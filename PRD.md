@@ -52,6 +52,7 @@ tuffman is a CLI-first AI agent orchestrator optimized for local LLM inference. 
 3. **Graceful Degradation** — Partial results beat total failure. Fallback chains are explicit.
 4. **Explicit Over Implicit** — User controls model routing, context strategy, token budgets.
 5. **Small & Inspectable** — SQLite and JSON configs can be opened, queried, version-controlled.
+6. **Discovery Over Enumeration** — Tool schemas are large; expose a discovery layer so models pull only what they need.
 
 ---
 
@@ -118,9 +119,27 @@ Intelligent exploration without overwhelming context.
 
 ### 5.5 Tool System
 
-Extensible capabilities for agents.
+Extensible capabilities for agents. Designed to minimize context bloat through lazy loading.
 
-**Built-in Tools:**
+**Discovery-First Architecture:**
+
+Instead of loading all tool schemas into context upfront, the system exposes a single discovery tool. The LLM queries this to find tools relevant to its current task, loading only what it needs.
+
+**Discovery Tool:**
+- `tool_search` — Search available tools by keyword, category, or capability
+  - Query: `"file operations"` → Returns `file_read`, `file_write`, `file_append`
+  - Query: `"git"` → Returns git-related tools (if installed)
+  - Query: `"list all"` → Returns categorized summary (names only, no schemas)
+- `tool_describe` — Fetch full schema for specific tools by name
+  - Called after discovery to load schemas on-demand
+  - Returns: parameters, return type, examples, error cases
+
+**Benefits:**
+- 50 tools with rich schemas → ~1 discovery tool in context initially
+- Schemas loaded only when the model explicitly needs them
+- Natural fit for local LLMs with limited context windows
+
+**Built-in Tools (Loaded on Demand):**
 - `file_read` — Read file contents with line ranges
 - `file_write` — Write or append to files
 - `shell_exec` — Execute shell commands with timeouts
@@ -130,7 +149,7 @@ Extensible capabilities for agents.
 
 **MCP Integration:**
 - Client for Model Context Protocol servers
-- Tool discovery and schema conversion
+- MCP tools registered in the same discovery index
 - Result caching to avoid redundant calls
 
 ### 5.6 Configuration System
@@ -221,7 +240,8 @@ Build the basic building blocks:
 3. **Storage** — SQLite setup, migrations, basic CRUD
 4. **Provider clients** — Unified interface, OpenAI and Ollama implementations
 5. **Tool registry** — Registration, discovery, execution framework
-6. **Basic conversation loop** — System prompt + messages + tool results
+6. **Tool discovery system** — `tool_search` and `tool_describe` for lazy schema loading
+7. **Basic conversation loop** — System prompt + messages + tool results
 
 **Deliverable:** Working chat with tools against local Ollama.
 
@@ -299,3 +319,5 @@ User experience refinements:
 | Hot/Warm/Cold | Tiers of context accessibility and detail |
 | Fan-out/Fan-in | Spawning parallel tasks, then aggregating results |
 | WAL | Write-Ahead Logging — SQLite mode for concurrency |
+| Tool Discovery | Pattern where models query for tools instead of receiving all schemas upfront |
+| Lazy Loading | Deferring loading of resources until they are explicitly needed |
