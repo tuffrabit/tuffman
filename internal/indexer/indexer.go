@@ -259,7 +259,6 @@ func (idx *Indexer) indexFile(path string, lang Language) error {
 }
 
 // parseFile parses a file and extracts symbols
-// This is a placeholder that will be implemented with tree-sitter in Phase 0.5.1
 func (idx *Indexer) parseFile(path string, lang Language) ([]*storage.Symbol, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -270,11 +269,15 @@ func (idx *Indexer) parseFile(path string, lang Language) ([]*storage.Symbol, er
 	case LangGo:
 		return idx.parseGo(content, path)
 	case LangPython:
-		// TODO: Implement in Phase 0.5.3
-		return nil, nil
-	case LangJavaScript, LangTypeScript:
-		// TODO: Implement in Phase 0.5.3
-		return nil, nil
+		return idx.parsePythonWithVariables(content, path)
+	case LangJavaScript:
+		return idx.parseJavaScript(content, path)
+	case LangTypeScript:
+		// Use TSX parser for .tsx files, regular TypeScript for .ts files
+		if strings.HasSuffix(strings.ToLower(path), ".tsx") {
+			return idx.parseTSX(content, path)
+		}
+		return idx.parseTypeScript(content, path)
 	default:
 		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
