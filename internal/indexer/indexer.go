@@ -25,8 +25,11 @@ const (
 
 // Config holds indexer configuration
 type Config struct {
-	// Root is the root directory to index
+	// Root is the root directory to index (the path provided by user)
 	Root string
+	
+	// ProjectRoot is the git root directory (used as base for file IDs)
+	ProjectRoot string
 	
 	// ExcludePatterns are glob patterns for files/directories to exclude
 	ExcludePatterns []string
@@ -35,10 +38,24 @@ type Config struct {
 	IncludeExtensions map[string]Language
 }
 
-// DefaultConfig returns a default configuration
+// DefaultConfig returns a default configuration with git root detection
 func DefaultConfig(root string) *Config {
+	// Resolve absolute path
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		absRoot = root
+	}
+	
+	// Find git root
+	gitRoot := findGitRoot(absRoot)
+	if gitRoot == "" {
+		// No git root found, use the provided root
+		gitRoot = absRoot
+	}
+	
 	return &Config{
-		Root: root,
+		Root:        absRoot,
+		ProjectRoot: gitRoot,
 		ExcludePatterns: []string{
 			".git",
 			".tuffman",
@@ -60,6 +77,30 @@ func DefaultConfig(root string) *Config {
 			".mts": LangTypeScript,
 		},
 	}
+}
+
+// findGitRoot searches for .git directory starting from path and walking up
+func findGitRoot(path string) string {
+	dir := path
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		dir = filepath.Dir(path)
+	}
+	
+	for {
+		gitPath := filepath.Join(dir, ".git")
+		if info, err := os.Stat(gitPath); err == nil && info.IsDir() {
+			return dir
+		}
+		
+		// Go up one directory
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	
+	return ""
 }
 
 // Indexer handles codebase indexing
@@ -133,7 +174,7 @@ func (idx *Indexer) IndexFile(path string) error {
 
 // shouldExclude checks if a path should be excluded from indexing
 func (idx *Indexer) shouldExclude(path string, d fs.DirEntry) bool {
-	rel, err := filepath.Rel(idx.config.Root, path)
+	rel, err := filepath.Rel(idx.config.ProjectRoot, path)
 	if err != nil {
 		return true
 	}
@@ -171,8 +212,8 @@ func (idx *Indexer) indexFile(path string, lang Language) error {
 		return fmt.Errorf("stat file: %w", err)
 	}
 
-	// Compute relative path as file ID
-	relPath, err := filepath.Rel(idx.config.Root, path)
+	// Compute relative path from project root as file ID
+	relPath, err := filepath.Rel(idx.config.ProjectRoot, path)
 	if err != nil {
 		return fmt.Errorf("computing relative path: %w", err)
 	}

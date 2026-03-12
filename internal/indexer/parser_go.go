@@ -1,247 +1,438 @@
 package indexer
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"strings"
+	"unsafe"
 
+	treesitter "github.com/tree-sitter/go-tree-sitter"
+	treesittergo "github.com/tree-sitter/tree-sitter-go/bindings/go"
 	"github.com/tuffrabit/tuffman/internal/storage"
 )
 
-// parseGo parses Go source code and extracts symbols using the Go standard library parser
+// goParser holds the tree-sitter parser for Go
+var goParser *treesitter.Parser
+
+func init() {
+	goParser = treesitter.NewParser()
+	goParser.SetLanguage(treesitter.NewLanguage(unsafe.Pointer(treesittergo.Language())))
+}
+
+// parseGo parses Go source code and extracts symbols using tree-sitter
 func (idx *Indexer) parseGo(content []byte, path string) ([]*storage.Symbol, error) {
-	fset := token.NewFileSet()
-	
-	// Parse with comments for doc extraction
-	f, err := parser.ParseFile(fset, path, content, parser.ParseComments)
-	if err != nil {
-		// Return empty symbols for unparseable files (don't fail entire indexing)
+	// Parse with tree-sitter - we get partial AST even on errors
+	tree := goParser.Parse(content, nil)
+	if tree == nil {
+		// Only fail if we get absolutely nothing
 		return nil, nil
 	}
+	defer tree.Close()
 
+	root := tree.RootNode()
+	
 	var symbols []*storage.Symbol
+	
+	// Walk the AST and extract symbols
+	walker := &goASTWalker{
+		content: content,
+		path:    path,
+		symbols: symbols,
+	}
+	walker.walk(root)
+	
+	return walker.symbols, nil
+}
 
-	// Extract package-level declarations
-	for _, decl := range f.Decls {
-		switch d := decl.(type) {
-		case *ast.FuncDecl:
-			if sym := idx.extractGoFunction(fset, d, content, path); sym != nil {
+// goASTWalker walks the Go AST and extracts symbols
+type goASTWalker struct {
+	content []byte
+	path    string
+	symbols []*storage.Symbol
+}
+
+// walk recursively walks the AST tree
+func (w *goASTWalker) walk(node *treesitter.Node) {
+	if node == nil {
+		return
+	}
+
+	// Check if this node represents a symbol
+	if sym := w.extractSymbol(node); sym != nil {
+		w.symbols = append(w.symbols, sym)
+	}
+
+	// Recursively walk children
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(uint(i))
+		if child != nil {
+			w.walk(child)
+		}
+	}
+}
+
+// extractSymbol extracts a symbol from a node if it represents one
+func (w *goASTWalker) extractSymbol(node *treesitter.Node) *storage.Symbol {
+	kind := node.Kind()
+	
+	switch kind {
+	case "function_declaration":
+		return w.extractFunction(node)
+	case "method_declaration":
+		return w.extractMethod(node)
+	case "type_declaration":
+		return w.extractTypeDeclaration(node)
+	case "const_declaration":
+		return w.extractConstDeclaration(node)
+	case "var_declaration":
+		return w.extractVarDeclaration(node)
+	}
+	
+	return nil
+}
+
+// extractFunction extracts a function symbol
+func (w *goASTWalker) extractFunction(node *treesitter.Node) *storage.Symbol {
+	nameNode := node.ChildByFieldName("name")
+	if nameNode == nil {
+		return nil
+	}
+	
+	name := w.nodeText(nameNode)
+	if name == "" {
+		return nil
+	}
+
+	signature := w.extractSignature(node)
+	doc := w.extractDoc(node)
+	
+	startLine := int(node.StartPosition().Row) + 1
+	endLine := int(node.EndPosition().Row) + 1
+
+	return &storage.Symbol{
+		ID:        fmt.Sprintf("%s#%s#%d", w.path, name, startLine),
+		Name:      name,
+		Kind:      "function",
+		Signature: signature,
+		Doc:       doc,
+		LineStart: startLine,
+		LineEnd:   endLine,
+	}
+}
+
+// extractMethod extracts a method symbol
+func (w *goASTWalker) extractMethod(node *treesitter.Node) *storage.Symbol {
+	nameNode := node.ChildByFieldName("name")
+	if nameNode == nil {
+		return nil
+	}
+	
+	name := w.nodeText(nameNode)
+	if name == "" {
+		return nil
+	}
+
+	receiver := w.extractReceiver(node)
+	signature := w.extractSignature(node)
+	doc := w.extractDoc(node)
+	
+	startLine := int(node.StartPosition().Row) + 1
+	endLine := int(node.EndPosition().Row) + 1
+
+	return &storage.Symbol{
+		ID:        fmt.Sprintf("%s#%s#%d", w.path, name, startLine),
+		Name:      name,
+		Kind:      "method",
+		Signature: signature,
+		Doc:       doc,
+		LineStart: startLine,
+		LineEnd:   endLine,
+		Receiver:  receiver,
+	}
+}
+
+// extractTypeDeclaration extracts struct/interface/type declarations
+func (w *goASTWalker) extractTypeDeclaration(node *treesitter.Node) *storage.Symbol {
+	// type_declaration contains type_spec children
+	var symbols []*storage.Symbol
+	
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(uint(i))
+		if child != nil && child.Kind() == "type_spec" {
+			if sym := w.extractTypeSpec(child); sym != nil {
 				symbols = append(symbols, sym)
 			}
+		}
+	}
+	
+	// Return the first symbol (usually there's only one per declaration)
+	if len(symbols) > 0 {
+		return symbols[0]
+	}
+	return nil
+}
 
-		case *ast.GenDecl:
-			// Handle type declarations (structs, interfaces)
-			if d.Tok == token.TYPE {
-				for _, spec := range d.Specs {
-					if ts, ok := spec.(*ast.TypeSpec); ok {
-						if sym := idx.extractGoType(fset, ts, d.Doc, content, path); sym != nil {
-							symbols = append(symbols, sym)
-						}
+// extractTypeSpec extracts a single type specification
+func (w *goASTWalker) extractTypeSpec(node *treesitter.Node) *storage.Symbol {
+	nameNode := node.ChildByFieldName("name")
+	if nameNode == nil {
+		return nil
+	}
+	
+	name := w.nodeText(nameNode)
+	if name == "" {
+		return nil
+	}
+
+	typeNode := node.ChildByFieldName("type")
+	if typeNode == nil {
+		return nil
+	}
+
+	// Determine kind and extract detailed signature
+	var kind string
+	var signature string
+	
+	switch typeNode.Kind() {
+	case "struct_type":
+		kind = "struct"
+		signature = w.extractStructSignature(typeNode, name)
+	case "interface_type":
+		kind = "interface"
+		signature = w.extractInterfaceSignature(typeNode, name)
+	default:
+		kind = "type"
+		signature = fmt.Sprintf("type %s %s", name, w.nodeText(typeNode))
+	}
+
+	startLine := int(node.StartPosition().Row) + 1
+	endLine := int(node.EndPosition().Row) + 1
+
+	return &storage.Symbol{
+		ID:        fmt.Sprintf("%s#%s#%d", w.path, name, startLine),
+		Name:      name,
+		Kind:      kind,
+		Signature: signature,
+		LineStart: startLine,
+		LineEnd:   endLine,
+	}
+}
+
+// extractStructSignature extracts struct fields as part of signature
+func (w *goASTWalker) extractStructSignature(node *treesitter.Node, name string) string {
+	var fields []string
+	
+	// Find field_declaration_list
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(uint(i))
+		if child != nil && child.Kind() == "field_declaration_list" {
+			// Iterate over field declarations
+			for j := 0; j < int(child.ChildCount()); j++ {
+				fieldDecl := child.Child(uint(j))
+				if fieldDecl != nil && fieldDecl.Kind() == "field_declaration" {
+					fieldStr := w.nodeText(fieldDecl)
+					// Clean up the field string (remove extra whitespace)
+					fieldStr = strings.Join(strings.Fields(fieldStr), " ")
+					fields = append(fields, fieldStr)
+				}
+			}
+		}
+	}
+	
+	if len(fields) == 0 {
+		return fmt.Sprintf("type %s struct {}", name)
+	}
+	
+	return fmt.Sprintf("type %s struct {\n\t%s\n}", name, strings.Join(fields, "\n\t"))
+}
+
+// extractInterfaceSignature extracts interface methods as part of signature
+func (w *goASTWalker) extractInterfaceSignature(node *treesitter.Node, name string) string {
+	var methods []string
+	
+	// Find method_spec_list
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(uint(i))
+		if child != nil && (child.Kind() == "method_spec_list" || child.Kind() == "interface_body") {
+			// Iterate over method specs
+			for j := 0; j < int(child.ChildCount()); j++ {
+				methodSpec := child.Child(uint(j))
+				if methodSpec != nil {
+					kind := methodSpec.Kind()
+					if kind == "method_spec" || kind == "interface_method" {
+						methodStr := w.nodeText(methodSpec)
+						methodStr = strings.Join(strings.Fields(methodStr), " ")
+						methods = append(methods, methodStr)
 					}
 				}
 			}
 		}
 	}
-
-	return symbols, nil
-}
-
-// extractGoFunction extracts a function or method symbol
-func (idx *Indexer) extractGoFunction(fset *token.FileSet, decl *ast.FuncDecl, content []byte, path string) *storage.Symbol {
-	name := decl.Name.Name
-	if name == "" {
-		return nil
-	}
-
-	// Determine kind and receiver
-	var kind string
-	var receiver string
 	
-	if decl.Recv != nil && len(decl.Recv.List) > 0 {
-		kind = "method"
-		receiver = idx.extractReceiverType(decl.Recv.List[0].Type)
-	} else {
-		kind = "function"
+	if len(methods) == 0 {
+		return fmt.Sprintf("type %s interface {}", name)
 	}
-
-	// Build signature
-	signature := idx.buildSignature(decl)
-
-	// Extract doc comment
-	doc := ""
-	if decl.Doc != nil {
-		doc = decl.Doc.Text()
-	}
-
-	pos := fset.Position(decl.Pos())
-	endPos := fset.Position(decl.End())
-
-	sym := &storage.Symbol{
-		ID:        fmt.Sprintf("%s#%s#%d", path, name, pos.Line),
-		Name:      name,
-		Kind:      kind,
-		Signature: signature,
-		Doc:       doc,
-		LineStart: pos.Line,
-		LineEnd:   endPos.Line,
-		Receiver:  receiver,
-	}
-
-	return sym
+	
+	return fmt.Sprintf("type %s interface {\n\t%s\n}", name, strings.Join(methods, "\n\t"))
 }
 
-// extractGoType extracts a type declaration (struct, interface, etc.)
-func (idx *Indexer) extractGoType(fset *token.FileSet, spec *ast.TypeSpec, doc *ast.CommentGroup, content []byte, path string) *storage.Symbol {
-	name := spec.Name.Name
+// extractConstDeclaration extracts const declarations
+func (w *goASTWalker) extractConstDeclaration(node *treesitter.Node) *storage.Symbol {
+	// const_declaration contains const_spec children
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(uint(i))
+		if child != nil && child.Kind() == "const_spec" {
+			return w.extractConstSpec(child)
+		}
+	}
+	return nil
+}
+
+// extractConstSpec extracts a single const specification
+func (w *goASTWalker) extractConstSpec(node *treesitter.Node) *storage.Symbol {
+	nameNode := node.ChildByFieldName("name")
+	if nameNode == nil {
+		return nil
+	}
+	
+	name := w.nodeText(nameNode)
 	if name == "" {
 		return nil
 	}
 
-	// Determine kind based on type
-	var kind string
-	switch spec.Type.(type) {
-	case *ast.StructType:
-		kind = "struct"
-	case *ast.InterfaceType:
-		kind = "interface"
-	default:
-		kind = "type"
+	typeNode := node.ChildByFieldName("type")
+	valueNode := node.ChildByFieldName("value")
+	
+	var signatureParts []string
+	if typeNode != nil {
+		signatureParts = append(signatureParts, w.nodeText(typeNode))
 	}
-
-	// Extract doc comment
-	docText := ""
-	if doc != nil {
-		docText = doc.Text()
+	if valueNode != nil {
+		signatureParts = append(signatureParts, "= "+w.nodeText(valueNode))
 	}
+	
+	signature := fmt.Sprintf("const %s %s", name, strings.Join(signatureParts, " "))
+	signature = strings.TrimSpace(signature)
+	
+	startLine := int(node.StartPosition().Row) + 1
+	endLine := int(node.EndPosition().Row) + 1
 
-	pos := fset.Position(spec.Pos())
-	endPos := fset.Position(spec.End())
-
-	sym := &storage.Symbol{
-		ID:        fmt.Sprintf("%s#%s#%d", path, name, pos.Line),
+	return &storage.Symbol{
+		ID:        fmt.Sprintf("%s#%s#%d", w.path, name, startLine),
 		Name:      name,
-		Kind:      kind,
-		Doc:       docText,
-		LineStart: pos.Line,
-		LineEnd:   endPos.Line,
+		Kind:      "const",
+		Signature: signature,
+		LineStart: startLine,
+		LineEnd:   endLine,
 	}
-
-	return sym
 }
 
-// extractReceiverType extracts the type name from a receiver expression
-func (idx *Indexer) extractReceiverType(expr ast.Expr) string {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		return t.Name
-	case *ast.StarExpr:
-		return idx.extractReceiverType(t.X)
-	case *ast.IndexExpr:
-		return idx.extractReceiverType(t.X)
-	default:
+// extractVarDeclaration extracts var declarations
+func (w *goASTWalker) extractVarDeclaration(node *treesitter.Node) *storage.Symbol {
+	// var_declaration contains var_spec children
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(uint(i))
+		if child != nil && child.Kind() == "var_spec" {
+			return w.extractVarSpec(child)
+		}
+	}
+	return nil
+}
+
+// extractVarSpec extracts a single var specification
+func (w *goASTWalker) extractVarSpec(node *treesitter.Node) *storage.Symbol {
+	nameNode := node.ChildByFieldName("name")
+	if nameNode == nil {
+		return nil
+	}
+	
+	name := w.nodeText(nameNode)
+	if name == "" {
+		return nil
+	}
+
+	typeNode := node.ChildByFieldName("type")
+	valueNode := node.ChildByFieldName("value")
+	
+	var signatureParts []string
+	if typeNode != nil {
+		signatureParts = append(signatureParts, w.nodeText(typeNode))
+	}
+	if valueNode != nil {
+		signatureParts = append(signatureParts, "= "+w.nodeText(valueNode))
+	}
+	
+	signature := fmt.Sprintf("var %s %s", name, strings.Join(signatureParts, " "))
+	signature = strings.TrimSpace(signature)
+	
+	startLine := int(node.StartPosition().Row) + 1
+	endLine := int(node.EndPosition().Row) + 1
+
+	return &storage.Symbol{
+		ID:        fmt.Sprintf("%s#%s#%d", w.path, name, startLine),
+		Name:      name,
+		Kind:      "var",
+		Signature: signature,
+		LineStart: startLine,
+		LineEnd:   endLine,
+	}
+}
+
+// extractReceiver extracts the receiver type from a method declaration
+func (w *goASTWalker) extractReceiver(node *treesitter.Node) string {
+	receiverNode := node.ChildByFieldName("receiver")
+	if receiverNode == nil {
 		return ""
 	}
-}
-
-// buildSignature builds a function/method signature string
-func (idx *Indexer) buildSignature(decl *ast.FuncDecl) string {
-	var sig strings.Builder
-
-	// Parameters
-	sig.WriteString("(")
-	if decl.Type.Params != nil {
-		params := []string{}
-		for _, param := range decl.Type.Params.List {
-			paramType := exprToString(param.Type)
-			for _, name := range param.Names {
-				params = append(params, fmt.Sprintf("%s %s", name.Name, paramType))
-			}
-			if len(param.Names) == 0 {
-				params = append(params, paramType)
-			}
-		}
-		sig.WriteString(strings.Join(params, ", "))
-	}
-	sig.WriteString(")")
-
-	// Return values
-	if decl.Type.Results != nil && len(decl.Type.Results.List) > 0 {
-		sig.WriteString(" ")
-		results := []string{}
-		for _, result := range decl.Type.Results.List {
-			resultType := exprToString(result.Type)
-			if len(result.Names) > 0 {
-				for _, name := range result.Names {
-					results = append(results, fmt.Sprintf("%s %s", name.Name, resultType))
-				}
-			} else {
-				results = append(results, resultType)
-			}
-		}
-		if len(results) == 1 {
-			sig.WriteString(results[0])
-		} else {
-			sig.WriteString("(")
-			sig.WriteString(strings.Join(results, ", "))
-			sig.WriteString(")")
-		}
-	}
-
-	return sig.String()
-}
-
-// exprToString converts an AST expression to a string representation
-func exprToString(expr ast.Expr) string {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.StarExpr:
-		return "*" + exprToString(e.X)
-	case *ast.ArrayType:
-		if e.Len == nil {
-			return "[]" + exprToString(e.Elt)
-		}
-		return fmt.Sprintf("[%s]%s", exprToString(e.Len), exprToString(e.Elt))
-	case *ast.SelectorExpr:
-		return fmt.Sprintf("%s.%s", exprToString(e.X), e.Sel.Name)
-	case *ast.InterfaceType:
-		return "interface{}"
-	case *ast.MapType:
-		return fmt.Sprintf("map[%s]%s", exprToString(e.Key), exprToString(e.Value))
-	case *ast.ChanType:
-		switch e.Dir {
-		case ast.SEND:
-			return fmt.Sprintf("chan<- %s", exprToString(e.Value))
-		case ast.RECV:
-			return fmt.Sprintf("<-chan %s", exprToString(e.Value))
-		default:
-			return fmt.Sprintf("chan %s", exprToString(e.Value))
-		}
-	case *ast.FuncType:
-		return "func(...)"
-	case *ast.BasicLit:
-		return e.Value
-	case *ast.Ellipsis:
-		return fmt.Sprintf("...%s", exprToString(e.Elt))
-	default:
-		return fmt.Sprintf("%T", expr)
-	}
-}
-
-// extractGoDoc extracts the doc comment preceding a declaration (legacy, kept for compatibility)
-func extractGoDoc(content []byte, lineStart int) string {
-	lines := bytes.Split(content, []byte("\n"))
-	var docs []string
 	
-	for i := lineStart - 2; i >= 0; i-- { // lineStart is 1-indexed
-		if i < 0 || i >= len(lines) {
-			break
+	// receiver is a parameter_list containing a parameter
+	for i := 0; i < int(receiverNode.ChildCount()); i++ {
+		child := receiverNode.Child(uint(i))
+		if child != nil && child.Kind() == "parameter_declaration" {
+			// Get the type from the parameter
+			typeNode := child.ChildByFieldName("type")
+			if typeNode != nil {
+				return w.nodeText(typeNode)
+			}
 		}
-		line := strings.TrimSpace(string(lines[i]))
+	}
+	
+	return ""
+}
+
+// extractSignature extracts the function/method signature
+func (w *goASTWalker) extractSignature(node *treesitter.Node) string {
+	paramsNode := node.ChildByFieldName("parameters")
+	resultNode := node.ChildByFieldName("result")
+	
+	var parts []string
+	
+	if paramsNode != nil {
+		parts = append(parts, w.nodeText(paramsNode))
+	} else {
+		parts = append(parts, "()")
+	}
+	
+	if resultNode != nil {
+		parts = append(parts, w.nodeText(resultNode))
+	}
+	
+	return strings.Join(parts, " ")
+}
+
+// extractDoc extracts documentation comments preceding a node
+func (w *goASTWalker) extractDoc(node *treesitter.Node) string {
+	// Get the start position of the node
+	startLine := int(node.StartPosition().Row)
+	
+	// Look for comment lines before this node
+	var docs []string
+	for i := startLine - 1; i >= 0; i-- {
+		if i >= len(strings.Split(string(w.content), "\n")) {
+			continue
+		}
+		lines := strings.Split(string(w.content), "\n")
+		line := strings.TrimSpace(lines[i])
+		
 		if strings.HasPrefix(line, "//") {
 			comment := strings.TrimSpace(strings.TrimPrefix(line, "//"))
 			docs = append([]string{comment}, docs...)
@@ -251,32 +442,23 @@ func extractGoDoc(content []byte, lineStart int) string {
 			break
 		}
 	}
-
+	
 	if len(docs) > 0 {
 		return strings.Join(docs, "\n")
 	}
 	return ""
 }
 
-// getLineNumber returns the 1-indexed line number for a position in content
-func getLineNumber(content []byte, pos int) int {
-	line := 1
-	for i := 0; i < pos && i < len(content); i++ {
-		if content[i] == '\n' {
-			line++
-		}
+// nodeText returns the text content of a node
+func (w *goASTWalker) nodeText(node *treesitter.Node) string {
+	if node == nil {
+		return ""
 	}
-	return line
-}
-
-// scanLines is a helper to iterate over lines in content
-func scanLines(content []byte, callback func(lineNum int, line []byte) bool) {
-	scanner := bufio.NewScanner(bytes.NewReader(content))
-	lineNum := 1
-	for scanner.Scan() {
-		if !callback(lineNum, scanner.Bytes()) {
-			break
-		}
-		lineNum++
+	start := node.StartByte()
+	end := node.EndByte()
+	contentLen := uint(len(w.content))
+	if start >= contentLen || end > contentLen {
+		return ""
 	}
+	return string(w.content[start:end])
 }
