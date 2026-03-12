@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"unsafe"
 
@@ -19,35 +20,44 @@ func init() {
 }
 
 // parseGo parses Go source code and extracts symbols using tree-sitter
-func (idx *Indexer) parseGo(content []byte, path string) ([]*storage.Symbol, error) {
+func (idx *Indexer) parseGo(content []byte, absPath string) ([]*storage.Symbol, []*storage.Reference, error) {
 	// Parse with tree-sitter - we get partial AST even on errors
 	tree := goParser.Parse(content, nil)
 	if tree == nil {
 		// Only fail if we get absolutely nothing
-		return nil, nil
+		return nil, nil, nil
 	}
 	defer tree.Close()
 
 	root := tree.RootNode()
 	
-	var symbols []*storage.Symbol
+	// Compute relative path for symbol IDs (consistent with storage)
+	relPath, err := filepath.Rel(idx.config.ProjectRoot, absPath)
+	if err != nil {
+		relPath = absPath
+	}
+	relPath = filepath.ToSlash(relPath)
 	
-	// Walk the AST and extract symbols
+	// Walk the AST and extract symbols and references
 	walker := &goASTWalker{
-		content: content,
-		path:    path,
-		symbols: symbols,
+		content:   content,
+		path:      relPath, // Use relative path for symbol IDs
+		symbols:   nil,
+		refs:      nil,
+		symStack:  nil,
 	}
 	walker.walk(root)
 	
-	return walker.symbols, nil
+	return walker.symbols, walker.refs, nil
 }
 
 // goASTWalker walks the Go AST and extracts symbols
 type goASTWalker struct {
-	content []byte
-	path    string
-	symbols []*storage.Symbol
+	content  []byte
+	path     string
+	symbols  []*storage.Symbol
+	refs     []*storage.Reference
+	symStack []*storage.Symbol // Stack of current symbol context
 }
 
 // walk recursively walks the AST tree
@@ -59,13 +69,31 @@ func (w *goASTWalker) walk(node *treesitter.Node) {
 	// Check if this node represents a symbol
 	if sym := w.extractSymbol(node); sym != nil {
 		w.symbols = append(w.symbols, sym)
-	}
-
-	// Recursively walk children
-	for i := 0; i < int(node.ChildCount()); i++ {
-		child := node.Child(uint(i))
-		if child != nil {
-			w.walk(child)
+		// Push symbol onto stack for reference context
+		w.symStack = append(w.symStack, sym)
+		
+		// Walk children with this symbol as context
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(uint(i))
+			if child != nil {
+				w.walk(child)
+			}
+		}
+		
+		// Pop symbol from stack
+		w.symStack = w.symStack[:len(w.symStack)-1]
+	} else {
+		// Extract references if we're inside a symbol context
+		if len(w.symStack) > 0 {
+			w.extractReferences(node)
+		}
+		
+		// Walk children without changing context
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(uint(i))
+			if child != nil {
+				w.walk(child)
+			}
 		}
 	}
 }
@@ -461,4 +489,94 @@ func (w *goASTWalker) nodeText(node *treesitter.Node) string {
 		return ""
 	}
 	return string(w.content[start:end])
+}
+
+// extractReferences extracts reference information from nodes
+func (w *goASTWalker) extractReferences(node *treesitter.Node) {
+	if len(w.symStack) == 0 {
+		return
+	}
+	
+	sourceID := w.symStack[len(w.symStack)-1].ID
+	
+	switch node.Kind() {
+	case "call_expression":
+		w.extractCallReference(node, sourceID)
+	case "import_spec":
+		w.extractImportReference(node, sourceID)
+	}
+}
+
+// extractCallReference extracts a function call reference
+func (w *goASTWalker) extractCallReference(node *treesitter.Node, sourceID string) {
+	funcNode := node.ChildByFieldName("function")
+	if funcNode == nil {
+		return
+	}
+	
+	// Get the function name being called
+	var targetName string
+	
+	switch funcNode.Kind() {
+	case "identifier":
+		// Simple function call: foo()
+		targetName = w.nodeText(funcNode)
+	case "selector_expression":
+		// Method or package call: pkg.Func() or obj.Method()
+		operand := funcNode.ChildByFieldName("operand")
+		field := funcNode.ChildByFieldName("field")
+		if field != nil {
+			fieldName := w.nodeText(field)
+			if operand != nil {
+				operandName := w.nodeText(operand)
+				targetName = operandName + "." + fieldName
+			} else {
+				targetName = fieldName
+			}
+		}
+	case "call_expression":
+		// Chained call: foo()()
+		// Skip for now - complex chains
+		return
+	default:
+		return
+	}
+	
+	if targetName == "" {
+		return
+	}
+	
+	line := int(node.StartPosition().Row) + 1
+	
+	w.refs = append(w.refs, &storage.Reference{
+		SourceID:   sourceID,
+		TargetName: targetName,
+		Kind:       "call",
+		Line:       line,
+	})
+}
+
+// extractImportReference extracts an import reference
+func (w *goASTWalker) extractImportReference(node *treesitter.Node, sourceID string) {
+	pathNode := node.ChildByFieldName("path")
+	if pathNode == nil {
+		return
+	}
+	
+	importPath := w.nodeText(pathNode)
+	// Remove quotes from import path
+	importPath = strings.Trim(importPath, `"`)
+	
+	if importPath == "" {
+		return
+	}
+	
+	line := int(node.StartPosition().Row) + 1
+	
+	w.refs = append(w.refs, &storage.Reference{
+		SourceID:   sourceID,
+		TargetName: importPath,
+		Kind:       "import",
+		Line:       line,
+	})
 }

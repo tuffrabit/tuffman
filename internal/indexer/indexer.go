@@ -221,13 +221,16 @@ func (idx *Indexer) indexFile(path string, lang Language) error {
 	// Use forward slashes for consistency
 	relPath = filepath.ToSlash(relPath)
 
-	// Delete existing symbols for this file (incremental update)
+	// Delete existing symbols and references for this file (incremental update)
 	if err := idx.db.DeleteSymbolsForFile(relPath); err != nil {
 		return fmt.Errorf("deleting old symbols: %w", err)
 	}
+	if err := idx.db.DeleteReferencesForFile(relPath); err != nil {
+		return fmt.Errorf("deleting old references: %w", err)
+	}
 
 	// Parse file based on language
-	symbols, err := idx.parseFile(path, lang)
+	symbols, refs, err := idx.parseFile(path, lang)
 	if err != nil {
 		return fmt.Errorf("parsing file: %w", err)
 	}
@@ -246,6 +249,9 @@ func (idx *Indexer) indexFile(path string, lang Language) error {
 		return fmt.Errorf("saving file: %w", err)
 	}
 
+	// Build symbol ID map for reference resolution
+	symbolMap := make(map[string]string) // name -> symbol ID
+	
 	// Save symbols
 	for _, sym := range symbols {
 		sym.FileID = relPath
@@ -253,33 +259,56 @@ func (idx *Indexer) indexFile(path string, lang Language) error {
 		if err := idx.db.SaveSymbol(sym); err != nil {
 			return fmt.Errorf("saving symbol %s: %w", sym.Name, err)
 		}
+		// Map symbol name to its ID for reference resolution
+		symbolMap[sym.Name] = sym.ID
+	}
+
+	// Save references with resolution
+	for _, ref := range refs {
+		// Try to resolve the target
+		if targetID, ok := symbolMap[ref.TargetName]; ok {
+			ref.TargetID = &targetID
+		} else {
+			// Try heuristic resolution: look up in database
+			targetSyms, err := idx.db.FindSymbolByName(ref.TargetName, relPath)
+			if err == nil && len(targetSyms) > 0 {
+				ref.TargetID = &targetSyms[0].ID
+			}
+		}
+		if err := idx.db.SaveReference(ref); err != nil {
+			return fmt.Errorf("saving reference: %w", err)
+		}
 	}
 
 	return nil
 }
 
-// parseFile parses a file and extracts symbols
-func (idx *Indexer) parseFile(path string, lang Language) ([]*storage.Symbol, error) {
+// parseFile parses a file and extracts symbols and references
+func (idx *Indexer) parseFile(path string, lang Language) ([]*storage.Symbol, []*storage.Reference, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading file: %w", err)
+		return nil, nil, fmt.Errorf("reading file: %w", err)
 	}
 
 	switch lang {
 	case LangGo:
 		return idx.parseGo(content, path)
 	case LangPython:
-		return idx.parsePythonWithVariables(content, path)
+		syms, err := idx.parsePythonWithVariables(content, path)
+		return syms, nil, err
 	case LangJavaScript:
-		return idx.parseJavaScript(content, path)
+		syms, err := idx.parseJavaScript(content, path)
+		return syms, nil, err
 	case LangTypeScript:
 		// Use TSX parser for .tsx files, regular TypeScript for .ts files
 		if strings.HasSuffix(strings.ToLower(path), ".tsx") {
-			return idx.parseTSX(content, path)
+			syms, err := idx.parseTSX(content, path)
+			return syms, nil, err
 		}
-		return idx.parseTypeScript(content, path)
+		syms, err := idx.parseTypeScript(content, path)
+		return syms, nil, err
 	default:
-		return nil, fmt.Errorf("unsupported language: %s", lang)
+		return nil, nil, fmt.Errorf("unsupported language: %s", lang)
 	}
 }
 
@@ -295,6 +324,11 @@ func (idx *Indexer) IndexFiles(paths []string) error {
 		ext := strings.ToLower(filepath.Ext(path))
 		lang, supported := idx.config.IncludeExtensions[ext]
 		if !supported {
+			continue
+		}
+
+		// Skip if file no longer exists
+		if _, err := os.Stat(path); err != nil {
 			continue
 		}
 

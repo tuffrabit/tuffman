@@ -37,6 +37,21 @@ CREATE TABLE IF NOT EXISTS symbols (
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
+
+CREATE TABLE IF NOT EXISTS symbol_refs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL,
+    target_name TEXT NOT NULL,
+    target_id TEXT,
+    kind TEXT,
+    line INTEGER,
+    FOREIGN KEY (source_id) REFERENCES symbols(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_id) REFERENCES symbols(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_refs_source ON symbol_refs(source_id);
+CREATE INDEX IF NOT EXISTS idx_refs_target_name ON symbol_refs(target_name);
+CREATE INDEX IF NOT EXISTS idx_refs_target_id ON symbol_refs(target_id);
 `
 
 // DB wraps the SQLite database connection
@@ -68,6 +83,16 @@ type Symbol struct {
 	LineStart int
 	LineEnd   int
 	Receiver  string
+}
+
+// Reference represents a reference from one symbol to another
+type Reference struct {
+	ID         int64
+	SourceID   string
+	TargetName string
+	TargetID   *string // Nullable - may be unresolved
+	Kind       string  // "call", "import"
+	Line       int
 }
 
 // Open opens or creates the SQLite database at the given path.
@@ -270,6 +295,206 @@ func scanSymbols(rows *sql.Rows) ([]*Symbol, error) {
 		symbols = append(symbols, &s)
 	}
 	return symbols, rows.Err()
+}
+
+// SaveReference inserts a reference record
+func (db *DB) SaveReference(ref *Reference) error {
+	_, err := db.conn.Exec(`
+		INSERT INTO symbol_refs (source_id, target_name, target_id, kind, line)
+		VALUES (?, ?, ?, ?, ?)
+	`, ref.SourceID, ref.TargetName, ref.TargetID, ref.Kind, ref.Line)
+	return err
+}
+
+// DeleteReferencesForFile removes all references where source symbols belong to a file
+func (db *DB) DeleteReferencesForFile(fileID string) error {
+	_, err := db.conn.Exec(`
+		DELETE FROM symbol_refs 
+		WHERE source_id IN (SELECT id FROM symbols WHERE file_id = ?)
+	`, fileID)
+	return err
+}
+
+// GetReferencesFrom retrieves all outgoing references from a symbol
+func (db *DB) GetReferencesFrom(sourceID string) ([]*Reference, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, source_id, target_name, target_id, kind, line
+		FROM symbol_refs WHERE source_id = ?
+		ORDER BY line
+	`, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanReferences(rows)
+}
+
+// GetReferencesTo retrieves all incoming references to a symbol (by target_id)
+func (db *DB) GetReferencesTo(targetID string) ([]*Reference, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, source_id, target_name, target_id, kind, line
+		FROM symbol_refs WHERE target_id = ?
+		ORDER BY line
+	`, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanReferences(rows)
+}
+
+// GetReferencesByName retrieves references by target name (for unresolved refs)
+func (db *DB) GetReferencesByName(targetName string) ([]*Reference, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, source_id, target_name, target_id, kind, line
+		FROM symbol_refs WHERE target_name = ?
+		ORDER BY line
+	`, targetName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanReferences(rows)
+}
+
+// FindSymbolByName finds symbols by name (heuristic resolution)
+func (db *DB) FindSymbolByName(name string, fileID string) ([]*Symbol, error) {
+	// First try: exact match in same file
+	rows, err := db.conn.Query(`
+		SELECT id, file_id, language, kind, name, signature, doc, line_start, line_end, receiver
+		FROM symbols WHERE name = ? AND file_id = ?
+		ORDER BY kind
+	`, name, fileID)
+	if err != nil {
+		return nil, err
+	}
+	symbols, err := scanSymbols(rows)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(symbols) > 0 {
+		return symbols, nil
+	}
+
+	// Second try: exact match anywhere
+	rows, err = db.conn.Query(`
+		SELECT id, file_id, language, kind, name, signature, doc, line_start, line_end, receiver
+		FROM symbols WHERE name = ?
+		ORDER BY kind
+	`, name)
+	if err != nil {
+		return nil, err
+	}
+	return scanSymbols(rows)
+}
+
+// UpdateReferenceTarget updates the target_id of a reference
+func (db *DB) UpdateReferenceTarget(refID int64, targetID string) error {
+	_, err := db.conn.Exec(`
+		UPDATE symbol_refs SET target_id = ? WHERE id = ?
+	`, targetID, refID)
+	return err
+}
+
+// GetFileLanguageStats returns language statistics for map command
+func (db *DB) GetFileLanguageStats() (map[string]int64, error) {
+	rows, err := db.conn.Query(`
+		SELECT language, COUNT(*) FROM files WHERE language != '' GROUP BY language
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stats := make(map[string]int64)
+	for rows.Next() {
+		var lang string
+		var count int64
+		if err := rows.Scan(&lang, &count); err != nil {
+			return nil, err
+		}
+		stats[lang] = count
+	}
+	return stats, rows.Err()
+}
+
+// GetDirectoryStats returns file and symbol counts per directory
+func (db *DB) GetDirectoryStats() (map[string]struct{ Files, Symbols int64 }, error) {
+	rows, err := db.conn.Query(`
+		SELECT 
+			CASE 
+				INSTR(id, '/') 
+				WHEN 0 THEN '.'
+				ELSE SUBSTR(id, 1, INSTR(id, '/') - 1)
+			END as dir,
+			COUNT(*) as files
+		FROM files
+		GROUP BY dir
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stats := make(map[string]struct{ Files, Symbols int64 })
+	for rows.Next() {
+		var dir string
+		var files int64
+		if err := rows.Scan(&dir, &files); err != nil {
+			return nil, err
+		}
+		stats[dir] = struct{ Files, Symbols int64 }{Files: files, Symbols: 0}
+	}
+	rows.Close()
+
+	// Get symbol counts per directory
+	rows, err = db.conn.Query(`
+		SELECT 
+			CASE 
+				INSTR(s.file_id, '/') 
+				WHEN 0 THEN '.'
+				ELSE SUBSTR(s.file_id, 1, INSTR(s.file_id, '/') - 1)
+			END as dir,
+			COUNT(*) as symbols
+		FROM symbols s
+		GROUP BY dir
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var dir string
+		var symbols int64
+		if err := rows.Scan(&dir, &symbols); err != nil {
+			return nil, err
+		}
+		if entry, ok := stats[dir]; ok {
+			entry.Symbols = symbols
+			stats[dir] = entry
+		}
+	}
+	return stats, rows.Err()
+}
+
+// scanReferences helper to scan multiple reference rows
+func scanReferences(rows *sql.Rows) ([]*Reference, error) {
+	var refs []*Reference
+	for rows.Next() {
+		var r Reference
+		var targetID sql.NullString
+		err := rows.Scan(&r.ID, &r.SourceID, &r.TargetName, &targetID, &r.Kind, &r.Line)
+		if err != nil {
+			return nil, err
+		}
+		if targetID.Valid {
+			r.TargetID = &targetID.String
+		}
+		refs = append(refs, &r)
+	}
+	return refs, rows.Err()
 }
 
 // BeginTx starts a new transaction
