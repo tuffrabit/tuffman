@@ -20,6 +20,110 @@ This plan implements tuffman in phases, starting with the riskiest component fir
 
 **Duration:** 2-3 weeks
 
+---
+
+### Phase 0.5.0: Foundation & Skeleton
+
+**Goal:** Core project structure and storage layer.
+
+**Duration:** 1 session
+
+**Deliverables:**
+1. **Project Structure** — Phase 1 layout with `internal/`, `cmd/`, `pkg/` directories
+2. **SQLite Storage Layer** — Database connection, migrations, basic CRUD operations
+3. **Schema Implementation** — `files` and `symbols` tables (references table deferred)
+4. **Basic CLI Framework** — `index` and `stats` commands only
+
+**Success Criteria:**
+- [ ] Database creates and migrates on first run
+- [ ] Can insert and query file records
+- [ ] Can insert and query symbol records
+- [ ] `tuffman stats` returns accurate counts
+
+---
+
+### Phase 0.5.1: Go Parser & Indexing
+
+**Goal:** Single-language parsing with tree-sitter.
+
+**Duration:** 1-2 sessions
+
+**Deliverables:**
+1. **Tree-sitter Integration** — CGO bindings, Go parser loading
+2. **AST Walker** — Extract functions, methods, structs, interfaces from Go code
+3. **File Scanner** — Walk directory, filter by extension, detect Git root
+4. **Batch Indexing** — `tuffman index [path]` command working end-to-end
+
+**Success Criteria:**
+- [ ] Indexes tuffman itself correctly
+- [ ] Extracts function names, signatures, line numbers
+- [ ] Handles malformed Go code gracefully
+- [ ] Can query symbols by name with `tuffman symbols <query>`
+
+---
+
+### Phase 0.5.2: Incremental Updates & Watching
+
+**Goal:** File system watching and incremental re-indexing.
+
+**Duration:** 1-2 sessions
+
+**Deliverables:**
+1. **fsnotify Integration** — Watch source directories for changes
+2. **Debounced Re-indexing** — 500ms delay, cancel in-flight operations
+3. **Incremental Updates** — Delete old symbols for changed files, re-parse, insert new
+4. **Git Branch Detection** — Monitor `.git/HEAD` for branch switches
+5. **`tuffman watch` Command** — Continuous indexing mode
+
+**Success Criteria:**
+- [ ] File change reflected in index within 1 second of save
+- [ ] Git branch switch triggers re-index of changed files
+- [ ] Graceful shutdown on interrupt (Ctrl-C)
+
+---
+
+### Phase 0.5.3: Multi-Language Support
+
+**Goal:** Python and JavaScript/TypeScript parsing.
+
+**Duration:** 2-3 sessions
+
+**Deliverables:**
+1. **Python Parser** — tree-sitter-python integration, AST walker
+2. **JavaScript/TypeScript Parser** — tree-sitter-javascript, tree-sitter-typescript
+3. **Language Detection** — File extension and content-based detection
+4. **Unified Symbol Extraction** — Common interface across languages
+
+**Success Criteria:**
+- [ ] Index a 50K LOC Go codebase in < 10 seconds
+- [ ] Index a 50K LOC Python codebase in < 10 seconds
+- [ ] Index a 50K LOC JS/TS codebase in < 10 seconds
+- [ ] Symbol coverage > 80% for standard code patterns in all three languages
+
+---
+
+### Phase 0.5.4: Query Interface & Reference Tracking
+
+**Goal:** Complete CLI toolset and basic reference resolution.
+
+**Duration:** 2 sessions
+
+**Deliverables:**
+1. **`tuffman map`** — Display repository structure
+2. **`tuffman inspect <symbol_id>`** — Show symbol details
+3. **`tuffman refs`** — Show incoming/outgoing references (basic heuristic matching)
+4. **`references` Table** — Store call expressions and imports
+5. **Call Chain Tracing** — Basic name-based resolution
+
+**Success Criteria:**
+- [ ] Query latency for `symbols` and `inspect` < 50ms
+- [ ] Can trace call chains 3+ levels deep (heuristic-based)
+- [ ] All Phase 0.5 CLI commands functional
+
+---
+
+### Phase 0.5 Summary
+
 **Core Architecture:**
 
 ```
@@ -135,16 +239,15 @@ This plan implements tuffman in phases, starting with the riskiest component fir
 | Symbol signatures | Include type annotations when available (Go, TS), parameter names always. Review token count impact. |
 | Tree-sitter binding | Validate `go-tree-sitter` handles malformed code gracefully and performance meets targets. |
 
-**Success Criteria:**
+**Phase 0.5 Success Criteria (Cumulative):**
 
-- [ ] Index a 50K LOC Go codebase in < 10 seconds
-- [ ] Index a 50K LOC Python codebase in < 10 seconds  
-- [ ] Index a 50K LOC JS/TS codebase in < 10 seconds
-- [ ] File change reflected in index within 1 second of save
-- [ ] Git branch switch triggers re-index of changed files
-- [ ] Query latency for `symbols` and `inspect` < 50ms
-- [ ] Can trace call chains 3+ levels deep accurately
-- [ ] Symbol coverage > 80% for standard code patterns
+| Criterion | Target Phase | Metric |
+|-----------|--------------|--------|
+| Database & Schema | 0.5.0 | Functional migrations, < 50ms query latency |
+| Go Indexing | 0.5.1 | Index tuffman in < 5 seconds, 80% symbol coverage |
+| File Watching | 0.5.2 | < 1 second reflection time, graceful shutdown |
+| Multi-Language | 0.5.3 | 50K LOC in < 10 seconds per language |
+| Query Interface | 0.5.4 | < 50ms query latency, 3-level call chains |
 
 **Test Codebases:**
 
@@ -154,6 +257,12 @@ This plan implements tuffman in phases, starting with the riskiest component fir
 
 **Phase Gate:** 
 If the indexer cannot meet success criteria or the architecture proves unworkable, we back up and re-evaluate tree-sitter approach before proceeding.
+
+**Integration Path:**
+Upon completion of Phase 0.5.4, the indexer will be refactored into:
+- `internal/indexer/` — Core indexing engine (library)
+- `internal/tools/search_symbols.go` — Agent tool implementation
+- `internal/tools/read_file.go` — File content tool (uses index for validation)
 
 ---
 
