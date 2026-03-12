@@ -8,6 +8,7 @@ import (
 
 	"github.com/tuffrabit/tuffman/internal/indexer"
 	"github.com/tuffrabit/tuffman/internal/storage"
+	"github.com/tuffrabit/tuffman/internal/watcher"
 )
 
 // Execute runs the CLI
@@ -22,6 +23,8 @@ func Execute(ctx context.Context) error {
 	switch cmd {
 	case "index":
 		return runIndex(ctx, args)
+	case "watch":
+		return runWatch(ctx, args)
 	case "stats":
 		return runStats(ctx, args)
 	case "symbols":
@@ -41,12 +44,15 @@ Usage:
 
 Commands:
   index [path]    Index a codebase (defaults to current directory)
+  watch [path]    Watch for changes and continuously index
   stats           Show indexing statistics
   symbols <query> Search for symbols by name
 
 Examples:
   tuffman index              # Index current directory
   tuffman index ./src        # Index specific directory
+  tuffman watch              # Watch current directory
+  tuffman watch ./src        # Watch specific directory
   tuffman stats              # Show database statistics
   tuffman symbols "Handler"  # Search for symbols containing "Handler"`)
 	return nil
@@ -206,6 +212,73 @@ func runSymbols(ctx context.Context, args []string) error {
 			fmt.Printf("  Doc: %s\n", doc)
 		}
 		fmt.Println()
+	}
+
+	return nil
+}
+
+func runWatch(ctx context.Context, args []string) error {
+	root := "."
+	if len(args) > 0 {
+		root = args[0]
+	}
+
+	// Convert to absolute path
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolving path: %w", err)
+	}
+
+	// Check if path exists
+	if _, err := os.Stat(absRoot); err != nil {
+		return fmt.Errorf("path does not exist: %s", absRoot)
+	}
+
+	// Open database
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Create indexer
+	config := indexer.DefaultConfig(absRoot)
+	idx := indexer.New(db, config)
+
+	fmt.Printf("Indexing %s...\n", absRoot)
+
+	// Run initial full index
+	if err := idx.Index(ctx); err != nil {
+		return fmt.Errorf("initial indexing failed: %w", err)
+	}
+
+	// Show stats
+	fileCount, symbolCount, err := idx.Stats()
+	if err != nil {
+		return fmt.Errorf("getting stats: %w", err)
+	}
+
+	fmt.Printf("\nInitial index complete: %d files, %d symbols\n", fileCount, symbolCount)
+	fmt.Println("\nWatching for changes... (Press Ctrl-C to stop)")
+
+	// Create watcher
+	watcherConfig := watcher.DefaultConfig(absRoot, config)
+	w, err := watcher.New(watcherConfig, idx)
+	if err != nil {
+		return fmt.Errorf("creating watcher: %w", err)
+	}
+
+	// Start watching
+	if err := w.Start(ctx); err != nil {
+		return fmt.Errorf("starting watcher: %w", err)
+	}
+
+	// Wait for context cancellation
+	<-ctx.Done()
+
+	fmt.Println("\nShutting down watcher...")
+	if err := w.Stop(); err != nil {
+		return fmt.Errorf("stopping watcher: %w", err)
 	}
 
 	return nil

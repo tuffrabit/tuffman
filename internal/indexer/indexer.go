@@ -284,3 +284,51 @@ func (idx *Indexer) parseFile(path string, lang Language) ([]*storage.Symbol, er
 func (idx *Indexer) Stats() (fileCount, symbolCount int64, err error) {
 	return idx.db.Stats()
 }
+
+// IndexFiles indexes a batch of files (implements watcher.Handler)
+func (idx *Indexer) IndexFiles(paths []string) error {
+	for _, path := range paths {
+		// Determine language from extension
+		ext := strings.ToLower(filepath.Ext(path))
+		lang, supported := idx.config.IncludeExtensions[ext]
+		if !supported {
+			continue
+		}
+
+		if err := idx.indexFile(path, lang); err != nil {
+			return fmt.Errorf("indexing %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// DeleteFile removes a file from the index (implements watcher.Handler)
+// The path parameter is the absolute path to the file
+func (idx *Indexer) DeleteFile(path string) error {
+	// First, try to find the file by absolute path
+	file, err := idx.db.GetFileByAbsolutePath(path)
+	if err != nil {
+		return fmt.Errorf("looking up file: %w", err)
+	}
+	
+	// If found, delete by ID (relative path)
+	if file != nil {
+		return idx.db.DeleteFile(file.ID)
+	}
+	
+	// If not found by absolute path, the path might already be a relative path
+	// Try computing relative path from project root
+	relPath, err := filepath.Rel(idx.config.ProjectRoot, path)
+	if err != nil {
+		return fmt.Errorf("computing relative path: %w", err)
+	}
+	relPath = filepath.ToSlash(relPath)
+	
+	return idx.db.DeleteFile(relPath)
+}
+
+// IndexAll performs a full re-index (implements watcher.Handler)
+func (idx *Indexer) IndexAll(ctx context.Context) error {
+	return idx.Index(ctx)
+}
+// Test comment added

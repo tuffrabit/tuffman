@@ -144,6 +144,30 @@ func (db *DB) DeleteFile(id string) error {
 	return err
 }
 
+// DeleteFileByAbsolutePath removes a file by its absolute path
+func (db *DB) DeleteFileByAbsolutePath(absPath string) error {
+	_, err := db.conn.Exec(`DELETE FROM files WHERE absolute_path = ?`, absPath)
+	return err
+}
+
+// GetFileByAbsolutePath retrieves a file by its absolute path
+func (db *DB) GetFileByAbsolutePath(absPath string) (*File, error) {
+	row := db.conn.QueryRow(`
+		SELECT id, absolute_path, language, size_bytes, mtime, indexed_at, git_sha
+		FROM files WHERE absolute_path = ?
+	`, absPath)
+
+	var f File
+	err := row.Scan(&f.ID, &f.AbsolutePath, &f.Language, &f.SizeBytes, &f.Mtime, &f.IndexedAt, &f.GitSHA)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
 // SaveSymbol inserts or replaces a symbol record
 func (db *DB) SaveSymbol(sym *Symbol) error {
 	_, err := db.conn.Exec(`
