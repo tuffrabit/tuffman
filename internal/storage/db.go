@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -419,6 +421,14 @@ func (db *DB) GetFileLanguageStats() (map[string]int64, error) {
 	return stats, rows.Err()
 }
 
+// DirectoryNode represents a node in the directory tree
+type DirectoryNode struct {
+	Name     string                    `json:"name"`
+	Files    int64                     `json:"files"`
+	Symbols  int64                     `json:"symbols"`
+	Children map[string]*DirectoryNode `json:"children,omitempty"`
+}
+
 // GetDirectoryStats returns file and symbol counts per directory
 func (db *DB) GetDirectoryStats() (map[string]struct{ Files, Symbols int64 }, error) {
 	rows, err := db.conn.Query(`
@@ -477,6 +487,115 @@ func (db *DB) GetDirectoryStats() (map[string]struct{ Files, Symbols int64 }, er
 		}
 	}
 	return stats, rows.Err()
+}
+
+// GetDirectoryTree returns a hierarchical directory tree with file and symbol counts
+// The depth parameter limits how many levels deep to include (0 = unlimited)
+func (db *DB) GetDirectoryTree(depth int) (*DirectoryNode, error) {
+	// Get all files with their paths
+	rows, err := db.conn.Query(`
+		SELECT id, indexed_at FROM files ORDER BY id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	root := &DirectoryNode{
+		Name:     ".",
+		Children: make(map[string]*DirectoryNode),
+	}
+
+	// Track all directory paths for symbol counting
+	dirPaths := make(map[string]bool)
+
+	for rows.Next() {
+		var fileID string
+		var indexedAt int64
+		if err := rows.Scan(&fileID, &indexedAt); err != nil {
+			return nil, err
+		}
+
+		// Count file at each directory level
+		parts := strings.Split(fileID, "/")
+		current := root
+		root.Files++
+
+		for i, part := range parts {
+			// Check depth limit (depth 1 means root + 1 level)
+			if depth > 0 && i >= depth {
+				break
+			}
+
+			if _, ok := current.Children[part]; !ok {
+				current.Children[part] = &DirectoryNode{
+					Name:     part,
+					Children: make(map[string]*DirectoryNode),
+				}
+			}
+			current = current.Children[part]
+			current.Files++
+			dirPaths[fileID[:len(fileID)-len(parts[len(parts)-1])-1]] = true
+		}
+	}
+	rows.Close()
+
+	// Get symbol counts per file
+	rows, err = db.conn.Query(`
+		SELECT s.file_id, COUNT(*) as symbol_count
+		FROM symbols s
+		GROUP BY s.file_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var fileID string
+		var symbolCount int64
+		if err := rows.Scan(&fileID, &symbolCount); err != nil {
+			return nil, err
+		}
+
+		// Add symbols to each directory level
+		parts := strings.Split(fileID, "/")
+		current := root
+		root.Symbols += symbolCount
+
+		for i, part := range parts {
+			// Check depth limit
+			if depth > 0 && i >= depth {
+				break
+			}
+
+			if child, ok := current.Children[part]; ok {
+				child.Symbols += symbolCount
+				current = child
+			} else {
+				break
+			}
+		}
+	}
+
+	return root, rows.Err()
+}
+
+// GetLastIndexedTime returns the most recent indexed_at time as UTC ISO 8601 string
+func (db *DB) GetLastIndexedTime() (string, error) {
+	var indexedAt int64
+	err := db.conn.QueryRow(`
+		SELECT MAX(indexed_at) FROM files
+	`).Scan(&indexedAt)
+	if err != nil {
+		return "", err
+	}
+	if indexedAt == 0 {
+		return "", nil
+	}
+	// Convert Unix timestamp to UTC ISO 8601
+	t := time.Unix(indexedAt, 0).UTC()
+	return t.Format(time.RFC3339), nil
 }
 
 // scanReferences helper to scan multiple reference rows

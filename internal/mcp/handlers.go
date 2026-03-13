@@ -69,10 +69,10 @@ func (h *Handler) handleGetRepositoryMap(ctx context.Context, arguments json.Raw
 		return nil, fmt.Errorf("getting language stats: %w", err)
 	}
 
-	// Get directory stats
-	dirStats, err := h.db.GetDirectoryStats()
+	// Get hierarchical directory tree
+	dirTree, err := h.db.GetDirectoryTree(args.Depth)
 	if err != nil {
-		return nil, fmt.Errorf("getting directory stats: %w", err)
+		return nil, fmt.Errorf("getting directory tree: %w", err)
 	}
 
 	totalFiles, totalSymbols, err := h.db.Stats()
@@ -80,17 +80,29 @@ func (h *Handler) handleGetRepositoryMap(ctx context.Context, arguments json.Raw
 		return nil, fmt.Errorf("getting stats: %w", err)
 	}
 
+	// Get last indexed time
+	lastIndexed, err := h.db.GetLastIndexedTime()
+	if err != nil {
+		return nil, fmt.Errorf("getting last indexed time: %w", err)
+	}
+
 	result := map[string]interface{}{
-		"root":          args.Path,
-		"languages":     langStats,
-		"total_files":   totalFiles,
-		"total_symbols": totalSymbols,
-		"directories":   dirStats,
+		"root":           args.Path,
+		"languages":      langStats,
+		"total_files":    totalFiles,
+		"total_symbols":  totalSymbols,
+		"last_indexed":   lastIndexed,
+		"directory_tree": dirTree,
+	}
+
+	text := fmt.Sprintf("Repository has %d files with %d symbols across %d languages", totalFiles, totalSymbols, len(langStats))
+	if lastIndexed != "" {
+		text += fmt.Sprintf(" (last indexed: %s)", lastIndexed)
 	}
 
 	return &ToolCallResponse{
 		Content: []ToolContent{
-			NewTextContent(fmt.Sprintf("Repository has %d files with %d symbols across %d languages", totalFiles, totalSymbols, len(langStats))),
+			NewTextContent(text),
 			NewJSONContent(result),
 		},
 	}, nil
@@ -371,16 +383,28 @@ func (h *Handler) handleGetIndexStatus(ctx context.Context, arguments json.RawMe
 		return nil, fmt.Errorf("getting language stats: %w", err)
 	}
 
+	// Get last indexed time
+	lastIndexed, err := h.db.GetLastIndexedTime()
+	if err != nil {
+		return nil, fmt.Errorf("getting last indexed time: %w", err)
+	}
+
 	result := map[string]interface{}{
 		"files":          fileCount,
 		"symbols":        symbolCount,
 		"languages":      langStats,
 		"language_count": len(langStats),
+		"last_indexed":   lastIndexed,
+	}
+
+	text := fmt.Sprintf("Index status: %d files, %d symbols indexed across %d languages", fileCount, symbolCount, len(langStats))
+	if lastIndexed != "" {
+		text += fmt.Sprintf(" (last indexed: %s)", lastIndexed)
 	}
 
 	return &ToolCallResponse{
 		Content: []ToolContent{
-			NewTextContent(fmt.Sprintf("Index status: %d files, %d symbols indexed across %d languages", fileCount, symbolCount, len(langStats))),
+			NewTextContent(text),
 			NewJSONContent(result),
 		},
 	}, nil
