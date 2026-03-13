@@ -64,12 +64,12 @@ func Execute(ctx context.Context) error {
 	case "index":
 		err = runIndex(ctx, filteredArgs)
 	case "daemon":
-		err = runDaemon(ctx, filteredArgs)
+		// daemon is an alias for watch
+		err = runWatch(ctx, filteredArgs)
 	case "mcp":
 		err = runMCP(ctx, filteredArgs)
 	case "watch":
-		// Deprecated: watch is now an alias for daemon
-		err = runDaemon(ctx, filteredArgs)
+		err = runWatch(ctx, filteredArgs)
 	case "status":
 		err = runStatus(ctx, filteredArgs)
 	case "stats":
@@ -85,9 +85,9 @@ func Execute(ctx context.Context) error {
 	case "read":
 		err = runRead(ctx, filteredArgs)
 	case "server":
-		// Deprecated: server command is replaced by daemon and mcp
-		fmt.Fprintf(os.Stderr, "Warning: 'server' command is deprecated. Use 'tuffman daemon' for watch mode or 'tuffman mcp' for client mode.\n")
-		err = runDaemon(ctx, filteredArgs)
+		// Deprecated: server command is replaced by watch and mcp
+		fmt.Fprintf(os.Stderr, "Warning: 'server' command is deprecated. Use 'tuffman watch' for watch mode or 'tuffman mcp' for client mode.\n")
+		err = runWatch(ctx, filteredArgs)
 	case "help", "--help", "-h":
 		err = printUsage()
 	default:
@@ -118,11 +118,11 @@ Usage:
 
 Daemon Commands (indexing & watching):
   index [path]           One-time index of a codebase
-  daemon [path]          Run continuous indexer/watcher (use this for MCP)
+  watch [path]           Run continuous indexer/watcher (use this for MCP)
 
 Query Commands (read-only, require existing index):
   mcp                    Run MCP client server (stdio, read-only)
-  status                 Check index status and daemon health
+  status                 Check index status
   stats                  Show indexing statistics
   symbols <query>        Search for symbols by name
   map [--depth N]        Display repository structure
@@ -134,14 +134,9 @@ Global Flags:
   --format <type>        Output format: text or json (default: text)
   --config <path>        Path to config file (overrides default locations)
 
-Daemon Flags:
-  --path <path>          Root path to index (default: current directory)
-  --transport <type>     MCP transport: stdio (default)
-  --no-watch             Disable auto-watch
-
 MCP Workflow:
-  1. Start daemon in background:
-     tuffman daemon &
+  1. Start watch/daemon in background:
+     tuffman watch &
   
   2. Use MCP client for queries:
      tuffman mcp
@@ -151,14 +146,13 @@ MCP Workflow:
      tuffman map
 
 Examples:
-  tuffman daemon                  # Start daemon for current directory
-  tuffman daemon ./src            # Start daemon for specific directory
-  tuffman daemon --no-watch       # Index once, don't watch for changes
-  tuffman mcp                     # Run MCP client (requires running daemon)
-  tuffman status                  # Check if index exists and is up to date
+  tuffman watch                   # Watch current directory
+  tuffman watch ./src             # Watch specific directory
+  tuffman mcp                     # Run MCP client (requires index)
+  tuffman status                  # Check index status
   tuffman index                   # One-time manual index
   tuffman stats                   # Show database statistics
-  tuffman symbols "Handler"       # Search for symbols containing "Handler"
+  tuffman symbols "Handler"       # Search for symbols
   tuffman map --depth 2           # Show structure 2 levels deep`)
 	return nil
 }
@@ -1284,87 +1278,6 @@ func readFileContent(filePath string, startLine, endLine int) (string, error) {
 
 	selectedLines := lines[startIdx : endIdx+1]
 	return strings.Join(selectedLines, "\n") + "\n", nil
-}
-
-// runDaemon runs the MCP daemon server with indexing and watching capabilities
-func runDaemon(ctx context.Context, args []string) error {
-	root := "."
-	transport := "stdio"
-	noWatch := false
-	configPath := ""
-
-	// Parse flags
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--path":
-			if i+1 < len(args) {
-				root = args[i+1]
-				i++
-			}
-		case "--transport":
-			if i+1 < len(args) {
-				transport = args[i+1]
-				i++
-			}
-		case "--no-watch":
-			noWatch = true
-		case "--config":
-			if i+1 < len(args) {
-				configPath = args[i+1]
-				i++
-			}
-		}
-	}
-
-	// Convert to absolute path
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return fmt.Errorf("resolving path: %w", err)
-	}
-
-	// Check if path exists
-	if _, err := os.Stat(absRoot); err != nil {
-		return fmt.Errorf("path does not exist: %s", absRoot)
-	}
-
-	// Load configuration
-	loader := config.NewLoader(absRoot)
-	if configPath != "" {
-		loader.SetOverridePath(configPath)
-	}
-	cfg, err := loader.Load()
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-
-	// Open database
-	dbPath := filepath.Join(absRoot, ".tuffman", "index.db")
-	tuffmanDir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(tuffmanDir, 0755); err != nil {
-		return fmt.Errorf("creating .tuffman directory: %w", err)
-	}
-
-	db, err := storage.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	defer db.Close()
-
-	// Create daemon server config
-	serverConfig := &mcp.ServerConfig{
-		Root:      absRoot,
-		Transport: transport,
-		NoWatch:   noWatch,
-		DB:        db,
-		Config:    cfg,
-	}
-
-	server, err := mcp.NewDaemonServer(serverConfig)
-	if err != nil {
-		return fmt.Errorf("creating MCP daemon server: %w", err)
-	}
-
-	return server.Run(ctx)
 }
 
 // runMCP runs the MCP client server (read-only, requires existing index)

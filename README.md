@@ -14,19 +14,16 @@ CGO_ENABLED=1 go build -o tuffman ./cmd/tuffman
 CGO_ENABLED=1 go build -ldflags="-s -w" -o tuffman ./cmd/tuffman
 ```
 
-### 2. Start the Daemon
+### 2. Start the Watcher
 
-For MCP integration, first start the daemon in your project directory:
+For MCP integration, first start the watcher in your project directory:
 
 ```bash
-# Start daemon with file watching
-tuffman daemon
+# Start watching and indexing
+tuffman watch
 
 # Or run in background
-tuffman daemon &
-
-# One-time index without watching
-tuffman daemon --no-watch
+tuffman watch &
 ```
 
 ### 3. Use MCP Client
@@ -45,16 +42,16 @@ tuffman status
 
 ## Architecture
 
-tuffman uses a **daemon + client** architecture:
+tuffman uses a **watcher + client** architecture:
 
-- **Daemon** (`tuffman daemon`): Runs continuously, indexes files, watches for changes
+- **Watcher** (`tuffman watch`): Runs continuously, indexes files, watches for changes
 - **Client** (`tuffman mcp`): Read-only MCP server for queries
 - **Database**: SQLite with WAL mode for concurrent access
 
 This design allows:
 - Multiple MCP clients to query the same index concurrently
 - Long-running indexing without blocking queries
-- Clear separation between write (daemon) and read (client) operations
+- Clear separation between write (watcher) and read (client) operations
 
 ## Commands
 
@@ -62,7 +59,7 @@ This design allows:
 
 | Command | Description |
 |---------|-------------|
-| `tuffman daemon [path]` | Run continuous indexer/watcher |
+| `tuffman watch [path]` | Run continuous indexer/watcher |
 | `tuffman index [path]` | One-time index |
 
 ### Query Commands (Read-Only)
@@ -96,14 +93,14 @@ For MCP clients (Claude Desktop, etc.), configure the **client** command:
 }
 ```
 
-**Important**: Ensure `tuffman daemon` is running in your project directory before using MCP tools.
+**Important**: Ensure `tuffman watch` is running in your project directory before using MCP tools.
 
 ## Workflow
 
 ```bash
-# Terminal 1: Start daemon
+# Terminal 1: Start watcher
 cd /path/to/project
-tuffman daemon
+tuffman watch &
 
 # Terminal 2: Query with CLI
 tuffman symbols "Handler"
