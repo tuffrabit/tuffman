@@ -26,6 +26,11 @@ const (
 // Global format flag (set during argument parsing)
 var globalFormat = FormatText
 
+// ErrorResult represents an error response in JSON format
+type ErrorResult struct {
+	Error string `json:"Error"`
+}
+
 // Execute runs the CLI
 func Execute(ctx context.Context) error {
 	if len(os.Args) < 2 {
@@ -44,7 +49,7 @@ func Execute(ctx context.Context) error {
 			if i+1 < len(args) {
 				globalFormat = OutputFormat(args[i+1])
 				if globalFormat != FormatJSON && globalFormat != FormatText {
-					return fmt.Errorf("invalid format: %s (must be 'text' or 'json')", globalFormat)
+					return handleError(fmt.Errorf("invalid format: %s (must be 'text' or 'json')", globalFormat))
 				}
 				i++
 			}
@@ -53,30 +58,46 @@ func Execute(ctx context.Context) error {
 		}
 	}
 
+	var err error
 	switch cmd {
 	case "index":
-		return runIndex(ctx, filteredArgs)
+		err = runIndex(ctx, filteredArgs)
 	case "watch":
-		return runWatch(ctx, filteredArgs)
+		err = runWatch(ctx, filteredArgs)
 	case "stats":
-		return runStats(ctx, filteredArgs)
+		err = runStats(ctx, filteredArgs)
 	case "symbols":
-		return runSymbols(ctx, filteredArgs)
+		err = runSymbols(ctx, filteredArgs)
 	case "map":
-		return runMap(ctx, filteredArgs)
+		err = runMap(ctx, filteredArgs)
 	case "inspect":
-		return runInspect(ctx, filteredArgs)
+		err = runInspect(ctx, filteredArgs)
 	case "refs":
-		return runRefs(ctx, filteredArgs)
+		err = runRefs(ctx, filteredArgs)
 	case "read":
-		return runRead(ctx, filteredArgs)
+		err = runRead(ctx, filteredArgs)
 	case "server":
-		return runServer(ctx, filteredArgs)
+		err = runServer(ctx, filteredArgs)
 	case "help", "--help", "-h":
-		return printUsage()
+		err = printUsage()
 	default:
-		return fmt.Errorf("unknown command: %s", cmd)
+		err = fmt.Errorf("unknown command: %s", cmd)
 	}
+
+	if err != nil {
+		return handleError(err)
+	}
+	return nil
+}
+
+// handleError returns an error, converting it to JSON if in JSON mode
+func handleError(err error) error {
+	if globalFormat == FormatJSON {
+		// Print JSON error to stdout and return nil (so main doesn't print text error)
+		printJSON(ErrorResult{Error: err.Error()})
+		return nil
+	}
+	return err
 }
 
 func printUsage() error {
@@ -166,6 +187,15 @@ func openDB() (*storage.DB, error) {
 	return db, nil
 }
 
+// IndexResult represents the result of an index operation for JSON output
+type IndexResult struct {
+	Root           string `json:"Root"`
+	FilesIndexed   int64  `json:"FilesIndexed"`
+	SymbolsIndexed int64  `json:"SymbolsIndexed"`
+	Success        bool   `json:"Success"`
+	Error          string `json:"Error,omitempty"`
+}
+
 func runIndex(ctx context.Context, args []string) error {
 	root := "."
 	if len(args) > 0 {
@@ -175,17 +205,26 @@ func runIndex(ctx context.Context, args []string) error {
 	// Convert to absolute path
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
+		if globalFormat == FormatJSON {
+			return printJSON(IndexResult{Root: root, Success: false, Error: fmt.Sprintf("resolving path: %v", err)})
+		}
 		return fmt.Errorf("resolving path: %w", err)
 	}
 
 	// Check if path exists
 	if _, err := os.Stat(absRoot); err != nil {
+		if globalFormat == FormatJSON {
+			return printJSON(IndexResult{Root: absRoot, Success: false, Error: fmt.Sprintf("path does not exist: %s", absRoot)})
+		}
 		return fmt.Errorf("path does not exist: %s", absRoot)
 	}
 
 	// Open database
 	db, err := openDB()
 	if err != nil {
+		if globalFormat == FormatJSON {
+			return printJSON(IndexResult{Root: absRoot, Success: false, Error: fmt.Sprintf("opening database: %v", err)})
+		}
 		return err
 	}
 	defer db.Close()
@@ -194,17 +233,34 @@ func runIndex(ctx context.Context, args []string) error {
 	config := indexer.DefaultConfig(absRoot)
 	idx := indexer.New(db, config)
 
-	fmt.Printf("Indexing %s...\n", absRoot)
+	if globalFormat != FormatJSON {
+		fmt.Printf("Indexing %s...\n", absRoot)
+	}
 
 	// Run indexing
 	if err := idx.Index(ctx); err != nil {
+		if globalFormat == FormatJSON {
+			return printJSON(IndexResult{Root: absRoot, Success: false, Error: fmt.Sprintf("indexing failed: %v", err)})
+		}
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
 	// Show stats
 	fileCount, symbolCount, err := idx.Stats()
 	if err != nil {
+		if globalFormat == FormatJSON {
+			return printJSON(IndexResult{Root: absRoot, Success: false, Error: fmt.Sprintf("getting stats: %v", err)})
+		}
 		return fmt.Errorf("getting stats: %w", err)
+	}
+
+	if globalFormat == FormatJSON {
+		return printJSON(IndexResult{
+			Root:           absRoot,
+			FilesIndexed:   fileCount,
+			SymbolsIndexed: symbolCount,
+			Success:        true,
+		})
 	}
 
 	fmt.Printf("\nIndexed %d files, %d symbols\n", fileCount, symbolCount)
@@ -225,8 +281,8 @@ func runStats(ctx context.Context, args []string) error {
 
 	if globalFormat == FormatJSON {
 		result := map[string]interface{}{
-			"files":   fileCount,
-			"symbols": symbolCount,
+			"Files":   fileCount,
+			"Symbols": symbolCount,
 		}
 		return printJSON(result)
 	}
@@ -268,9 +324,9 @@ func runSymbols(ctx context.Context, args []string) error {
 
 	if globalFormat == FormatJSON {
 		result := map[string]interface{}{
-			"query":   query,
-			"count":   len(symbols),
-			"symbols": symbols,
+			"Query":   query,
+			"Count":   len(symbols),
+			"Symbols": symbols,
 		}
 		return printJSON(result)
 	}
@@ -305,6 +361,67 @@ func runSymbols(ctx context.Context, args []string) error {
 	return nil
 }
 
+// WatchEvent represents a watch event for JSON output
+type WatchEvent struct {
+	Type        string `json:"Type"` // "indexed", "deleted", "error", "full_reindex", "info"
+	Path        string `json:"Path,omitempty"`
+	Error       string `json:"Error,omitempty"`
+	FileCount   int64  `json:"FileCount,omitempty"`
+	SymbolCount int64  `json:"SymbolCount,omitempty"`
+	Message     string `json:"Message,omitempty"`
+}
+
+// jsonWatchHandler wraps the indexer to output JSON events
+type jsonWatchHandler struct {
+	idx *indexer.Indexer
+}
+
+func (h *jsonWatchHandler) IndexFiles(paths []string) error {
+	err := h.idx.IndexFiles(paths)
+	for _, path := range paths {
+		event := WatchEvent{Type: "indexed", Path: path}
+		if err != nil {
+			event.Type = "error"
+			event.Error = err.Error()
+		}
+		printJSONLine(event)
+	}
+	return err
+}
+
+func (h *jsonWatchHandler) DeleteFile(path string) error {
+	err := h.idx.DeleteFile(path)
+	event := WatchEvent{Type: "deleted", Path: path}
+	if err != nil {
+		event.Type = "error"
+		event.Error = err.Error()
+	}
+	printJSONLine(event)
+	return err
+}
+
+func (h *jsonWatchHandler) IndexAll(ctx context.Context) error {
+	printJSONLine(WatchEvent{Type: "info", Message: "Starting full re-index"})
+	err := h.idx.IndexAll(ctx)
+	if err != nil {
+		printJSONLine(WatchEvent{Type: "error", Error: err.Error()})
+		return err
+	}
+	fileCount, symbolCount, _ := h.idx.Stats()
+	printJSONLine(WatchEvent{
+		Type:        "full_reindex",
+		FileCount:   fileCount,
+		SymbolCount: symbolCount,
+	})
+	return nil
+}
+
+// printJSONLine prints a JSON object followed by a newline (for streaming)
+func printJSONLine(v interface{}) {
+	data, _ := json.Marshal(v)
+	fmt.Println(string(data))
+}
+
 func runWatch(ctx context.Context, args []string) error {
 	root := "."
 	if len(args) > 0 {
@@ -314,17 +431,29 @@ func runWatch(ctx context.Context, args []string) error {
 	// Convert to absolute path
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
+		if globalFormat == FormatJSON {
+			printJSONLine(WatchEvent{Type: "error", Error: fmt.Sprintf("resolving path: %v", err)})
+			return nil
+		}
 		return fmt.Errorf("resolving path: %w", err)
 	}
 
 	// Check if path exists
 	if _, err := os.Stat(absRoot); err != nil {
+		if globalFormat == FormatJSON {
+			printJSONLine(WatchEvent{Type: "error", Error: fmt.Sprintf("path does not exist: %s", absRoot)})
+			return nil
+		}
 		return fmt.Errorf("path does not exist: %s", absRoot)
 	}
 
 	// Open database
 	db, err := openDB()
 	if err != nil {
+		if globalFormat == FormatJSON {
+			printJSONLine(WatchEvent{Type: "error", Error: fmt.Sprintf("opening database: %v", err)})
+			return nil
+		}
 		return err
 	}
 	defer db.Close()
@@ -333,39 +462,84 @@ func runWatch(ctx context.Context, args []string) error {
 	config := indexer.DefaultConfig(absRoot)
 	idx := indexer.New(db, config)
 
-	fmt.Printf("Indexing %s...\n", absRoot)
+	isJSONMode := globalFormat == FormatJSON
+
+	if !isJSONMode {
+		fmt.Printf("Indexing %s...\n", absRoot)
+	}
 
 	// Run initial full index
 	if err := idx.Index(ctx); err != nil {
+		if isJSONMode {
+			printJSONLine(WatchEvent{Type: "error", Error: fmt.Sprintf("initial indexing failed: %v", err)})
+			return nil
+		}
 		return fmt.Errorf("initial indexing failed: %w", err)
 	}
 
 	// Show stats
 	fileCount, symbolCount, err := idx.Stats()
 	if err != nil {
+		if isJSONMode {
+			printJSONLine(WatchEvent{Type: "error", Error: fmt.Sprintf("getting stats: %v", err)})
+			return nil
+		}
 		return fmt.Errorf("getting stats: %w", err)
 	}
 
-	fmt.Printf("\nInitial index complete: %d files, %d symbols\n", fileCount, symbolCount)
-	fmt.Println("\nWatching for changes... (Press Ctrl-C to stop)")
+	if isJSONMode {
+		printJSONLine(WatchEvent{
+			Type:        "info",
+			Message:     "Initial index complete",
+			FileCount:   fileCount,
+			SymbolCount: symbolCount,
+		})
+		printJSONLine(WatchEvent{Type: "info", Message: "Watching for changes"})
+	} else {
+		fmt.Printf("\nInitial index complete: %d files, %d symbols\n", fileCount, symbolCount)
+		fmt.Println("\nWatching for changes... (Press Ctrl-C to stop)")
+	}
 
 	// Create watcher
 	watcherConfig := watcher.DefaultConfig(absRoot, config)
-	w, err := watcher.New(watcherConfig, idx)
+
+	var handler watcher.Handler = idx
+	if isJSONMode {
+		handler = &jsonWatchHandler{idx: idx}
+	}
+
+	w, err := watcher.New(watcherConfig, handler)
 	if err != nil {
+		if isJSONMode {
+			printJSONLine(WatchEvent{Type: "error", Error: fmt.Sprintf("creating watcher: %v", err)})
+			return nil
+		}
 		return fmt.Errorf("creating watcher: %w", err)
 	}
 
 	// Start watching
 	if err := w.Start(ctx); err != nil {
+		if isJSONMode {
+			printJSONLine(WatchEvent{Type: "error", Error: fmt.Sprintf("starting watcher: %v", err)})
+			return nil
+		}
 		return fmt.Errorf("starting watcher: %w", err)
 	}
 
 	// Wait for context cancellation
 	<-ctx.Done()
 
-	fmt.Println("\nShutting down watcher...")
+	if isJSONMode {
+		printJSONLine(WatchEvent{Type: "info", Message: "Shutting down watcher"})
+	} else {
+		fmt.Println("\nShutting down watcher...")
+	}
+
 	if err := w.Stop(); err != nil {
+		if isJSONMode {
+			printJSONLine(WatchEvent{Type: "error", Error: fmt.Sprintf("stopping watcher: %v", err)})
+			return nil
+		}
 		return fmt.Errorf("stopping watcher: %w", err)
 	}
 
@@ -407,11 +581,11 @@ func runMap(ctx context.Context, args []string) error {
 
 	if globalFormat == FormatJSON {
 		result := map[string]interface{}{
-			"root":          ".",
-			"languages":     langStats,
-			"directories":   dirStats,
-			"total_files":   totalFiles,
-			"total_symbols": totalSymbols,
+			"Root":         ".",
+			"Languages":    langStats,
+			"Directories":  dirStats,
+			"TotalFiles":   totalFiles,
+			"TotalSymbols": totalSymbols,
 		}
 		return printJSON(result)
 	}
@@ -513,9 +687,9 @@ func runInspect(ctx context.Context, args []string) error {
 
 	if globalFormat == FormatJSON {
 		result := map[string]interface{}{
-			"symbol":   sym,
-			"outgoing": outgoing,
-			"incoming": incoming,
+			"Symbol":   sym,
+			"Outgoing": outgoing,
+			"Incoming": incoming,
 		}
 		return printJSON(result)
 	}
@@ -603,6 +777,39 @@ func runInspect(ctx context.Context, args []string) error {
 	return nil
 }
 
+// RefTreeNode represents a node in the reference tree for JSON output
+type RefTreeNode struct {
+	SymbolID   string        `json:"SymbolID"`
+	Name       string        `json:"Name"`
+	Kind       string        `json:"Kind"`
+	FileID     string        `json:"FileID"`
+	Line       int           `json:"Line"`
+	Resolved   bool          `json:"Resolved"`
+	Children   []RefTreeNode `json:"Children,omitempty"`
+	IsCycle    bool          `json:"IsCycle,omitempty"`
+	DepthLimit bool          `json:"DepthLimit,omitempty"`
+}
+
+// IncomingRef represents a single incoming reference for JSON output
+type IncomingRef struct {
+	SourceID   string `json:"SourceID"`
+	SourceName string `json:"SourceName"`
+	SourceKind string `json:"SourceKind"`
+	SourceFile string `json:"SourceFile"`
+	Line       int    `json:"Line"`
+	Kind       string `json:"Kind"`
+}
+
+// RefsResult represents the complete refs command result for JSON output
+type RefsResult struct {
+	SymbolID   string        `json:"SymbolID"`
+	SymbolName string        `json:"SymbolName"`
+	SymbolKind string        `json:"SymbolKind"`
+	Direction  string        `json:"Direction"`
+	Outgoing   []RefTreeNode `json:"Outgoing,omitempty"`
+	Incoming   []IncomingRef `json:"Incoming,omitempty"`
+}
+
 func runRefs(ctx context.Context, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: tuffman refs <symbol_id> [--direction in|out]")
@@ -637,6 +844,26 @@ func runRefs(ctx context.Context, args []string) error {
 		return fmt.Errorf("symbol not found: %s", symbolID)
 	}
 
+	if globalFormat == FormatJSON {
+		result := RefsResult{
+			SymbolID:   symbolID,
+			SymbolName: sym.Name,
+			SymbolKind: sym.Kind,
+			Direction:  direction,
+		}
+
+		if direction == "out" || direction == "both" {
+			result.Outgoing = buildOutgoingTree(db, symbolID, 0, 10, make(map[string]bool))
+		}
+
+		if direction == "in" || direction == "both" {
+			result.Incoming = buildIncomingList(db, symbolID)
+		}
+
+		return printJSON(result)
+	}
+
+	// Text output
 	fmt.Printf("References for: %s (%s)\n", sym.Name, sym.Kind)
 	fmt.Println(strings.Repeat("=", 50))
 	fmt.Println()
@@ -659,6 +886,99 @@ func runRefs(ctx context.Context, args []string) error {
 	}
 
 	return nil
+}
+
+// buildOutgoingTree builds the hierarchical tree of outgoing references for JSON
+func buildOutgoingTree(db *storage.DB, symbolID string, depth, maxDepth int, visited map[string]bool) []RefTreeNode {
+	if depth > maxDepth {
+		return nil
+	}
+
+	// Cycle detection
+	if visited[symbolID] {
+		return []RefTreeNode{{
+			SymbolID: symbolID,
+			IsCycle:  true,
+		}}
+	}
+
+	visited[symbolID] = true
+	defer delete(visited, symbolID)
+
+	outgoing, err := db.GetReferencesFrom(symbolID)
+	if err != nil {
+		return nil
+	}
+
+	// Filter to just calls
+	var calls []*storage.Reference
+	for _, ref := range outgoing {
+		if ref.Kind == "call" {
+			calls = append(calls, ref)
+		}
+	}
+
+	if len(calls) == 0 {
+		return nil
+	}
+
+	var nodes []RefTreeNode
+	for _, ref := range calls {
+		node := RefTreeNode{
+			SymbolID: ref.TargetName,
+			Name:     ref.TargetName,
+			Line:     ref.Line,
+			Resolved: ref.TargetID != nil,
+		}
+
+		if ref.TargetID != nil {
+			node.SymbolID = *ref.TargetID
+			targetSym, _ := db.GetSymbol(*ref.TargetID)
+			if targetSym != nil {
+				node.Name = targetSym.Name
+				node.Kind = targetSym.Kind
+				node.FileID = targetSym.FileID
+				// Recurse
+				node.Children = buildOutgoingTree(db, *ref.TargetID, depth+1, maxDepth, visited)
+			}
+		}
+
+		if depth >= maxDepth && len(node.Children) == 0 && node.Resolved {
+			node.DepthLimit = true
+		}
+
+		nodes = append(nodes, node)
+	}
+
+	return nodes
+}
+
+// buildIncomingList builds the list of incoming references for JSON
+func buildIncomingList(db *storage.DB, symbolID string) []IncomingRef {
+	incoming, err := db.GetReferencesTo(symbolID)
+	if err != nil {
+		return nil
+	}
+
+	var refs []IncomingRef
+	for _, ref := range incoming {
+		r := IncomingRef{
+			SourceID: ref.SourceID,
+			Line:     ref.Line,
+			Kind:     ref.Kind,
+		}
+
+		sourceSym, _ := db.GetSymbol(ref.SourceID)
+		if sourceSym != nil {
+			r.SourceName = sourceSym.Name
+			r.SourceKind = sourceSym.Kind
+			r.SourceFile = sourceSym.FileID
+		}
+
+		refs = append(refs, r)
+	}
+
+	return refs
 }
 
 // showOutgoingRefs shows outgoing references with call chain tracing
@@ -830,11 +1150,11 @@ func runRead(ctx context.Context, args []string) error {
 
 	if globalFormat == FormatJSON {
 		result := map[string]interface{}{
-			"file":          filePath,
-			"absolute_path": absolutePath,
-			"start_line":    startLine,
-			"end_line":      endLine,
-			"content":       content,
+			"File":         filePath,
+			"AbsolutePath": absolutePath,
+			"StartLine":    startLine,
+			"EndLine":      endLine,
+			"Content":      content,
 		}
 		return printJSON(result)
 	}
