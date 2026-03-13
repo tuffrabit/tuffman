@@ -30,24 +30,24 @@ func (idx *Indexer) parseGo(content []byte, absPath string) ([]*storage.Symbol, 
 	defer tree.Close()
 
 	root := tree.RootNode()
-	
+
 	// Compute relative path for symbol IDs (consistent with storage)
 	relPath, err := filepath.Rel(idx.config.ProjectRoot, absPath)
 	if err != nil {
 		relPath = absPath
 	}
 	relPath = filepath.ToSlash(relPath)
-	
+
 	// Walk the AST and extract symbols and references
 	walker := &goASTWalker{
-		content:   content,
-		path:      relPath, // Use relative path for symbol IDs
-		symbols:   nil,
-		refs:      nil,
-		symStack:  nil,
+		content:  content,
+		path:     relPath, // Use relative path for symbol IDs
+		symbols:  nil,
+		refs:     nil,
+		symStack: nil,
 	}
 	walker.walk(root)
-	
+
 	return walker.symbols, walker.refs, nil
 }
 
@@ -71,7 +71,7 @@ func (w *goASTWalker) walk(node *treesitter.Node) {
 		w.symbols = append(w.symbols, sym)
 		// Push symbol onto stack for reference context
 		w.symStack = append(w.symStack, sym)
-		
+
 		// Walk children with this symbol as context
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(uint(i))
@@ -79,7 +79,7 @@ func (w *goASTWalker) walk(node *treesitter.Node) {
 				w.walk(child)
 			}
 		}
-		
+
 		// Pop symbol from stack
 		w.symStack = w.symStack[:len(w.symStack)-1]
 	} else {
@@ -87,7 +87,7 @@ func (w *goASTWalker) walk(node *treesitter.Node) {
 		if len(w.symStack) > 0 {
 			w.extractReferences(node)
 		}
-		
+
 		// Walk children without changing context
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(uint(i))
@@ -101,7 +101,7 @@ func (w *goASTWalker) walk(node *treesitter.Node) {
 // extractSymbol extracts a symbol from a node if it represents one
 func (w *goASTWalker) extractSymbol(node *treesitter.Node) *storage.Symbol {
 	kind := node.Kind()
-	
+
 	switch kind {
 	case "function_declaration":
 		return w.extractFunction(node)
@@ -114,7 +114,7 @@ func (w *goASTWalker) extractSymbol(node *treesitter.Node) *storage.Symbol {
 	case "var_declaration":
 		return w.extractVarDeclaration(node)
 	}
-	
+
 	return nil
 }
 
@@ -124,7 +124,7 @@ func (w *goASTWalker) extractFunction(node *treesitter.Node) *storage.Symbol {
 	if nameNode == nil {
 		return nil
 	}
-	
+
 	name := w.nodeText(nameNode)
 	if name == "" {
 		return nil
@@ -132,7 +132,7 @@ func (w *goASTWalker) extractFunction(node *treesitter.Node) *storage.Symbol {
 
 	signature := w.extractSignature(node)
 	doc := w.extractDoc(node)
-	
+
 	startLine := int(node.StartPosition().Row) + 1
 	endLine := int(node.EndPosition().Row) + 1
 
@@ -153,7 +153,7 @@ func (w *goASTWalker) extractMethod(node *treesitter.Node) *storage.Symbol {
 	if nameNode == nil {
 		return nil
 	}
-	
+
 	name := w.nodeText(nameNode)
 	if name == "" {
 		return nil
@@ -162,7 +162,7 @@ func (w *goASTWalker) extractMethod(node *treesitter.Node) *storage.Symbol {
 	receiver := w.extractReceiver(node)
 	signature := w.extractSignature(node)
 	doc := w.extractDoc(node)
-	
+
 	startLine := int(node.StartPosition().Row) + 1
 	endLine := int(node.EndPosition().Row) + 1
 
@@ -182,7 +182,7 @@ func (w *goASTWalker) extractMethod(node *treesitter.Node) *storage.Symbol {
 func (w *goASTWalker) extractTypeDeclaration(node *treesitter.Node) *storage.Symbol {
 	// type_declaration contains type_spec children
 	var symbols []*storage.Symbol
-	
+
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(uint(i))
 		if child != nil && child.Kind() == "type_spec" {
@@ -191,7 +191,7 @@ func (w *goASTWalker) extractTypeDeclaration(node *treesitter.Node) *storage.Sym
 			}
 		}
 	}
-	
+
 	// Return the first symbol (usually there's only one per declaration)
 	if len(symbols) > 0 {
 		return symbols[0]
@@ -205,7 +205,7 @@ func (w *goASTWalker) extractTypeSpec(node *treesitter.Node) *storage.Symbol {
 	if nameNode == nil {
 		return nil
 	}
-	
+
 	name := w.nodeText(nameNode)
 	if name == "" {
 		return nil
@@ -219,7 +219,7 @@ func (w *goASTWalker) extractTypeSpec(node *treesitter.Node) *storage.Symbol {
 	// Determine kind and extract detailed signature
 	var kind string
 	var signature string
-	
+
 	switch typeNode.Kind() {
 	case "struct_type":
 		kind = "struct"
@@ -248,7 +248,7 @@ func (w *goASTWalker) extractTypeSpec(node *treesitter.Node) *storage.Symbol {
 // extractStructSignature extracts struct fields as part of signature
 func (w *goASTWalker) extractStructSignature(node *treesitter.Node, name string) string {
 	var fields []string
-	
+
 	// Find field_declaration_list
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(uint(i))
@@ -265,18 +265,18 @@ func (w *goASTWalker) extractStructSignature(node *treesitter.Node, name string)
 			}
 		}
 	}
-	
+
 	if len(fields) == 0 {
 		return fmt.Sprintf("type %s struct {}", name)
 	}
-	
+
 	return fmt.Sprintf("type %s struct {\n\t%s\n}", name, strings.Join(fields, "\n\t"))
 }
 
 // extractInterfaceSignature extracts interface methods as part of signature
 func (w *goASTWalker) extractInterfaceSignature(node *treesitter.Node, name string) string {
 	var methods []string
-	
+
 	// Find method_spec_list
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(uint(i))
@@ -295,11 +295,11 @@ func (w *goASTWalker) extractInterfaceSignature(node *treesitter.Node, name stri
 			}
 		}
 	}
-	
+
 	if len(methods) == 0 {
 		return fmt.Sprintf("type %s interface {}", name)
 	}
-	
+
 	return fmt.Sprintf("type %s interface {\n\t%s\n}", name, strings.Join(methods, "\n\t"))
 }
 
@@ -321,7 +321,7 @@ func (w *goASTWalker) extractConstSpec(node *treesitter.Node) *storage.Symbol {
 	if nameNode == nil {
 		return nil
 	}
-	
+
 	name := w.nodeText(nameNode)
 	if name == "" {
 		return nil
@@ -329,7 +329,7 @@ func (w *goASTWalker) extractConstSpec(node *treesitter.Node) *storage.Symbol {
 
 	typeNode := node.ChildByFieldName("type")
 	valueNode := node.ChildByFieldName("value")
-	
+
 	var signatureParts []string
 	if typeNode != nil {
 		signatureParts = append(signatureParts, w.nodeText(typeNode))
@@ -337,10 +337,10 @@ func (w *goASTWalker) extractConstSpec(node *treesitter.Node) *storage.Symbol {
 	if valueNode != nil {
 		signatureParts = append(signatureParts, "= "+w.nodeText(valueNode))
 	}
-	
+
 	signature := fmt.Sprintf("const %s %s", name, strings.Join(signatureParts, " "))
 	signature = strings.TrimSpace(signature)
-	
+
 	startLine := int(node.StartPosition().Row) + 1
 	endLine := int(node.EndPosition().Row) + 1
 
@@ -372,7 +372,7 @@ func (w *goASTWalker) extractVarSpec(node *treesitter.Node) *storage.Symbol {
 	if nameNode == nil {
 		return nil
 	}
-	
+
 	name := w.nodeText(nameNode)
 	if name == "" {
 		return nil
@@ -380,7 +380,7 @@ func (w *goASTWalker) extractVarSpec(node *treesitter.Node) *storage.Symbol {
 
 	typeNode := node.ChildByFieldName("type")
 	valueNode := node.ChildByFieldName("value")
-	
+
 	var signatureParts []string
 	if typeNode != nil {
 		signatureParts = append(signatureParts, w.nodeText(typeNode))
@@ -388,10 +388,10 @@ func (w *goASTWalker) extractVarSpec(node *treesitter.Node) *storage.Symbol {
 	if valueNode != nil {
 		signatureParts = append(signatureParts, "= "+w.nodeText(valueNode))
 	}
-	
+
 	signature := fmt.Sprintf("var %s %s", name, strings.Join(signatureParts, " "))
 	signature = strings.TrimSpace(signature)
-	
+
 	startLine := int(node.StartPosition().Row) + 1
 	endLine := int(node.EndPosition().Row) + 1
 
@@ -411,7 +411,7 @@ func (w *goASTWalker) extractReceiver(node *treesitter.Node) string {
 	if receiverNode == nil {
 		return ""
 	}
-	
+
 	// receiver is a parameter_list containing a parameter
 	for i := 0; i < int(receiverNode.ChildCount()); i++ {
 		child := receiverNode.Child(uint(i))
@@ -423,7 +423,7 @@ func (w *goASTWalker) extractReceiver(node *treesitter.Node) string {
 			}
 		}
 	}
-	
+
 	return ""
 }
 
@@ -431,19 +431,19 @@ func (w *goASTWalker) extractReceiver(node *treesitter.Node) string {
 func (w *goASTWalker) extractSignature(node *treesitter.Node) string {
 	paramsNode := node.ChildByFieldName("parameters")
 	resultNode := node.ChildByFieldName("result")
-	
+
 	var parts []string
-	
+
 	if paramsNode != nil {
 		parts = append(parts, w.nodeText(paramsNode))
 	} else {
 		parts = append(parts, "()")
 	}
-	
+
 	if resultNode != nil {
 		parts = append(parts, w.nodeText(resultNode))
 	}
-	
+
 	return strings.Join(parts, " ")
 }
 
@@ -451,7 +451,7 @@ func (w *goASTWalker) extractSignature(node *treesitter.Node) string {
 func (w *goASTWalker) extractDoc(node *treesitter.Node) string {
 	// Get the start position of the node
 	startLine := int(node.StartPosition().Row)
-	
+
 	// Look for comment lines before this node
 	var docs []string
 	for i := startLine - 1; i >= 0; i-- {
@@ -460,7 +460,7 @@ func (w *goASTWalker) extractDoc(node *treesitter.Node) string {
 		}
 		lines := strings.Split(string(w.content), "\n")
 		line := strings.TrimSpace(lines[i])
-		
+
 		if strings.HasPrefix(line, "//") {
 			comment := strings.TrimSpace(strings.TrimPrefix(line, "//"))
 			docs = append([]string{comment}, docs...)
@@ -470,7 +470,7 @@ func (w *goASTWalker) extractDoc(node *treesitter.Node) string {
 			break
 		}
 	}
-	
+
 	if len(docs) > 0 {
 		return strings.Join(docs, "\n")
 	}
@@ -496,9 +496,9 @@ func (w *goASTWalker) extractReferences(node *treesitter.Node) {
 	if len(w.symStack) == 0 {
 		return
 	}
-	
+
 	sourceID := w.symStack[len(w.symStack)-1].ID
-	
+
 	switch node.Kind() {
 	case "call_expression":
 		w.extractCallReference(node, sourceID)
@@ -513,10 +513,10 @@ func (w *goASTWalker) extractCallReference(node *treesitter.Node, sourceID strin
 	if funcNode == nil {
 		return
 	}
-	
+
 	// Get the function name being called
 	var targetName string
-	
+
 	switch funcNode.Kind() {
 	case "identifier":
 		// Simple function call: foo()
@@ -541,13 +541,13 @@ func (w *goASTWalker) extractCallReference(node *treesitter.Node, sourceID strin
 	default:
 		return
 	}
-	
+
 	if targetName == "" {
 		return
 	}
-	
+
 	line := int(node.StartPosition().Row) + 1
-	
+
 	w.refs = append(w.refs, &storage.Reference{
 		SourceID:   sourceID,
 		TargetName: targetName,
@@ -562,17 +562,17 @@ func (w *goASTWalker) extractImportReference(node *treesitter.Node, sourceID str
 	if pathNode == nil {
 		return
 	}
-	
+
 	importPath := w.nodeText(pathNode)
 	// Remove quotes from import path
 	importPath = strings.Trim(importPath, `"`)
-	
+
 	if importPath == "" {
 		return
 	}
-	
+
 	line := int(node.StartPosition().Row) + 1
-	
+
 	w.refs = append(w.refs, &storage.Reference{
 		SourceID:   sourceID,
 		TargetName: importPath,

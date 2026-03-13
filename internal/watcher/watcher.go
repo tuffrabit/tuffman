@@ -24,28 +24,28 @@ const (
 
 // Event represents a file system event
 type Event struct {
-	Path      string
-	Type      EventType
-	IsDir     bool
+	Path  string
+	Type  EventType
+	IsDir bool
 }
 
 // Config holds watcher configuration
 type Config struct {
 	// Root directory to watch
 	Root string
-	
+
 	// ExcludePatterns are patterns for files/directories to exclude
 	ExcludePatterns []string
-	
+
 	// SupportedExtensions maps extensions to languages
 	SupportedExtensions map[string]struct{}
-	
+
 	// DebounceDelay is the delay before processing events
 	DebounceDelay time.Duration
-	
+
 	// MaxRetries is the maximum number of retries for failed indexing
 	MaxRetries int
-	
+
 	// RetryDelay is the delay between retries
 	RetryDelay time.Duration
 }
@@ -56,7 +56,7 @@ func DefaultConfig(root string, indexerConfig *indexer.Config) *Config {
 	for ext := range indexerConfig.IncludeExtensions {
 		exts[ext] = struct{}{}
 	}
-	
+
 	return &Config{
 		Root:                root,
 		ExcludePatterns:     indexerConfig.ExcludePatterns,
@@ -71,40 +71,40 @@ func DefaultConfig(root string, indexerConfig *indexer.Config) *Config {
 type Handler interface {
 	// IndexFiles indexes a batch of files
 	IndexFiles(paths []string) error
-	
+
 	// DeleteFile removes a file from the index
 	DeleteFile(path string) error
-	
+
 	// IndexAll performs a full re-index
 	IndexAll(ctx context.Context) error
 }
 
 // Watcher watches a directory for file changes and triggers indexing
 type Watcher struct {
-	config      *Config
-	handler     Handler
-	fsWatcher   *fsnotify.Watcher
-	
+	config    *Config
+	handler   Handler
+	fsWatcher *fsnotify.Watcher
+
 	// Events are sent to this channel
 	events chan Event
-	
+
 	// Pending changes are accumulated here
-	pending     map[string]EventType
-	pendingMu   sync.Mutex
-	
+	pending   map[string]EventType
+	pendingMu sync.Mutex
+
 	// Debounce timer
-	timer       *time.Timer
-	timerMu     sync.Mutex
-	
+	timer   *time.Timer
+	timerMu sync.Mutex
+
 	// In-flight operation cancellation
-	cancel      context.CancelFunc
-	cancelMu    sync.Mutex
-	
+	cancel   context.CancelFunc
+	cancelMu sync.Mutex
+
 	// Git HEAD path for branch detection
 	gitHeadPath string
-	
+
 	// Stop channel
-	stopCh      chan struct{}
+	stopCh chan struct{}
 }
 
 // New creates a new Watcher
@@ -113,7 +113,7 @@ func New(config *Config, handler Handler) (*Watcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating fsnotify watcher: %w", err)
 	}
-	
+
 	w := &Watcher{
 		config:    config,
 		handler:   handler,
@@ -122,10 +122,10 @@ func New(config *Config, handler Handler) (*Watcher, error) {
 		pending:   make(map[string]EventType),
 		stopCh:    make(chan struct{}),
 	}
-	
+
 	// Find git HEAD path if in a git repo
 	w.gitHeadPath = w.findGitHead(config.Root)
-	
+
 	return w, nil
 }
 
@@ -137,7 +137,7 @@ func (w *Watcher) findGitHead(root string) string {
 		if info, err := os.Stat(gitHead); err == nil && !info.IsDir() {
 			return gitHead
 		}
-		
+
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			break
@@ -153,13 +153,13 @@ func (w *Watcher) Start(ctx context.Context) error {
 	if err := w.addWatches(); err != nil {
 		return fmt.Errorf("adding watches: %w", err)
 	}
-	
+
 	// Start event processor
 	go w.processEvents(ctx)
-	
+
 	// Start fsnotify event handler
 	go w.handleFsEvents(ctx)
-	
+
 	return nil
 }
 
@@ -169,7 +169,7 @@ func (w *Watcher) addWatches() error {
 		if err != nil {
 			return err
 		}
-		
+
 		// Skip excluded paths
 		if w.shouldExclude(path, d) {
 			if d.IsDir() {
@@ -177,17 +177,17 @@ func (w *Watcher) addWatches() error {
 			}
 			return nil
 		}
-		
+
 		// Only watch directories
 		if !d.IsDir() {
 			return nil
 		}
-		
+
 		if err := w.fsWatcher.Add(path); err != nil {
 			// Log but don't fail - some directories might not be watchable
 			fmt.Fprintf(os.Stderr, "Warning: could not watch %s: %v\n", path, err)
 		}
-		
+
 		return nil
 	})
 }
@@ -198,20 +198,20 @@ func (w *Watcher) shouldExclude(path string, d os.DirEntry) bool {
 	if err != nil {
 		return true
 	}
-	
+
 	base := filepath.Base(path)
-	
+
 	for _, pattern := range w.config.ExcludePatterns {
 		// Direct match
 		if base == pattern {
 			return true
 		}
-		
+
 		// Glob match
 		if matched, _ := filepath.Match(pattern, base); matched {
 			return true
 		}
-		
+
 		// Path component match for directories
 		if d.IsDir() && strings.Contains(rel, string(filepath.Separator)+pattern+string(filepath.Separator)) {
 			return true
@@ -220,7 +220,7 @@ func (w *Watcher) shouldExclude(path string, d os.DirEntry) bool {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -232,13 +232,13 @@ func (w *Watcher) handleFsEvents(ctx context.Context) {
 			return
 		case <-w.stopCh:
 			return
-			
+
 		case event, ok := <-w.fsWatcher.Events:
 			if !ok {
 				return
 			}
 			w.handleEvent(event)
-			
+
 		case err, ok := <-w.fsWatcher.Errors:
 			if !ok {
 				return
@@ -251,7 +251,7 @@ func (w *Watcher) handleFsEvents(ctx context.Context) {
 // handleEvent processes a single fsnotify event
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := event.Name
-	
+
 	// Check if this is .git/HEAD change (branch switch)
 	if w.gitHeadPath != "" && path == w.gitHeadPath {
 		if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
@@ -260,11 +260,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			return
 		}
 	}
-	
+
 	// Get file info
 	info, err := os.Stat(path)
 	isDir := err == nil && info.IsDir()
-	
+
 	// Handle directory creation - add it to watch
 	if isDir && event.Has(fsnotify.Create) {
 		// Check if this directory should be excluded
@@ -295,13 +295,13 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		}
 		return
 	}
-	
+
 	// Check if file extension is supported
 	ext := strings.ToLower(filepath.Ext(path))
 	if _, supported := w.config.SupportedExtensions[ext]; !supported {
 		return
 	}
-	
+
 	// Skip excluded files
 	// Check exclusion using file info
 	if err == nil {
@@ -325,7 +325,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			}
 		}
 	}
-	
+
 	// Determine event type
 	var eventType EventType
 	switch {
@@ -338,7 +338,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	default:
 		return
 	}
-	
+
 	// Queue the event
 	w.events <- Event{
 		Path:  path,
@@ -355,13 +355,13 @@ func (w *Watcher) processEvents(ctx context.Context) {
 			return
 		case <-w.stopCh:
 			return
-			
+
 		case event := <-w.events:
 			w.pendingMu.Lock()
-			
+
 			// Add to pending changes
 			w.pending[event.Path] = event.Type
-			
+
 			// Cancel any in-flight operation
 			w.cancelMu.Lock()
 			if w.cancel != nil {
@@ -369,9 +369,9 @@ func (w *Watcher) processEvents(ctx context.Context) {
 				w.cancel = nil
 			}
 			w.cancelMu.Unlock()
-			
+
 			w.pendingMu.Unlock()
-			
+
 			// Reset debounce timer
 			w.resetTimer()
 		}
@@ -382,40 +382,40 @@ func (w *Watcher) processEvents(ctx context.Context) {
 func (w *Watcher) resetTimer() {
 	w.timerMu.Lock()
 	defer w.timerMu.Unlock()
-	
+
 	if w.timer != nil {
 		w.timer.Stop()
 	}
-	
+
 	w.timer = time.AfterFunc(w.config.DebounceDelay, w.processPending)
 }
 
 // processPending processes all pending changes
 func (w *Watcher) processPending() {
 	w.pendingMu.Lock()
-	
+
 	// Copy and clear pending
 	pending := make(map[string]EventType, len(w.pending))
 	for k, v := range w.pending {
 		pending[k] = v
 	}
 	w.pending = make(map[string]EventType)
-	
+
 	// Create new context for this operation
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancelMu.Lock()
 	w.cancel = cancel
 	w.cancelMu.Unlock()
-	
+
 	w.pendingMu.Unlock()
-	
+
 	// Process the batch
 	if err := w.processBatch(ctx, pending); err != nil {
 		if err != context.Canceled {
 			fmt.Fprintf(os.Stderr, "Error processing batch: %v\n", err)
 		}
 	}
-	
+
 	// Clear cancel function
 	w.cancelMu.Lock()
 	w.cancel = nil
@@ -426,7 +426,7 @@ func (w *Watcher) processPending() {
 func (w *Watcher) processBatch(ctx context.Context, pending map[string]EventType) error {
 	var toIndex []string
 	var toDelete []string
-	
+
 	for path, eventType := range pending {
 		// Check if operation was cancelled
 		select {
@@ -434,7 +434,7 @@ func (w *Watcher) processBatch(ctx context.Context, pending map[string]EventType
 			return ctx.Err()
 		default:
 		}
-		
+
 		switch eventType {
 		case EventDelete:
 			toDelete = append(toDelete, path)
@@ -445,7 +445,7 @@ func (w *Watcher) processBatch(ctx context.Context, pending map[string]EventType
 			}
 		}
 	}
-	
+
 	// Process deletions
 	for _, path := range toDelete {
 		select {
@@ -453,14 +453,14 @@ func (w *Watcher) processBatch(ctx context.Context, pending map[string]EventType
 			return ctx.Err()
 		default:
 		}
-		
+
 		if err := w.handler.DeleteFile(path); err != nil {
 			fmt.Fprintf(os.Stderr, "Error deleting %s from index: %v\n", path, err)
 		} else {
 			fmt.Printf("Removed from index: %s\n", path)
 		}
 	}
-	
+
 	// Process indexing with retries
 	if len(toIndex) > 0 {
 		if err := w.indexWithRetry(ctx, toIndex); err != nil {
@@ -475,26 +475,26 @@ func (w *Watcher) processBatch(ctx context.Context, pending map[string]EventType
 			}
 		}
 	}
-	
+
 	return nil
 }
 
 // indexWithRetry attempts to index files with retries
 func (w *Watcher) indexWithRetry(ctx context.Context, paths []string) error {
 	var lastErr error
-	
+
 	for attempt := 0; attempt < w.config.MaxRetries; attempt++ {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		
+
 		if attempt > 0 {
 			fmt.Printf("Retrying index (attempt %d/%d)...\n", attempt+1, w.config.MaxRetries)
 			time.Sleep(w.config.RetryDelay)
 		}
-		
+
 		err := w.handler.IndexFiles(paths)
 		if err == nil {
 			for _, path := range paths {
@@ -502,11 +502,11 @@ func (w *Watcher) indexWithRetry(ctx context.Context, paths []string) error {
 			}
 			return nil
 		}
-		
+
 		lastErr = err
 		fmt.Fprintf(os.Stderr, "Index attempt %d failed: %v\n", attempt+1, err)
 	}
-	
+
 	return lastErr
 }
 
@@ -519,12 +519,12 @@ func (w *Watcher) triggerFullReindex() {
 		w.cancel = nil
 	}
 	w.cancelMu.Unlock()
-	
+
 	// Clear pending changes
 	w.pendingMu.Lock()
 	w.pending = make(map[string]EventType)
 	w.pendingMu.Unlock()
-	
+
 	// Run full re-index in background
 	go func() {
 		ctx := context.Background()
@@ -540,12 +540,12 @@ func (w *Watcher) triggerFullReindex() {
 // Stop stops the watcher
 func (w *Watcher) Stop() error {
 	close(w.stopCh)
-	
+
 	w.timerMu.Lock()
 	if w.timer != nil {
 		w.timer.Stop()
 	}
 	w.timerMu.Unlock()
-	
+
 	return w.fsWatcher.Close()
 }

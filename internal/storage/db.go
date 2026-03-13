@@ -62,13 +62,13 @@ type DB struct {
 
 // File represents a source file in the database
 type File struct {
-	ID             string
-	AbsolutePath   string
-	Language       string
-	SizeBytes      int64
-	Mtime          int64
-	IndexedAt      int64
-	GitSHA         string
+	ID           string
+	AbsolutePath string
+	Language     string
+	SizeBytes    int64
+	Mtime        int64
+	IndexedAt    int64
+	GitSHA       string
 }
 
 // Symbol represents a code symbol (function, struct, etc.) in the database
@@ -309,7 +309,7 @@ func (db *DB) SaveReference(ref *Reference) error {
 // DeleteReferencesForFile removes all references where source symbols belong to a file
 func (db *DB) DeleteReferencesForFile(fileID string) error {
 	_, err := db.conn.Exec(`
-		DELETE FROM symbol_refs 
+		DELETE FROM symbol_refs
 		WHERE source_id IN (SELECT id FROM symbols WHERE file_id = ?)
 	`, fileID)
 	return err
@@ -422,9 +422,9 @@ func (db *DB) GetFileLanguageStats() (map[string]int64, error) {
 // GetDirectoryStats returns file and symbol counts per directory
 func (db *DB) GetDirectoryStats() (map[string]struct{ Files, Symbols int64 }, error) {
 	rows, err := db.conn.Query(`
-		SELECT 
-			CASE 
-				INSTR(id, '/') 
+		SELECT
+			CASE
+				INSTR(id, '/')
 				WHEN 0 THEN '.'
 				ELSE SUBSTR(id, 1, INSTR(id, '/') - 1)
 			END as dir,
@@ -450,9 +450,9 @@ func (db *DB) GetDirectoryStats() (map[string]struct{ Files, Symbols int64 }, er
 
 	// Get symbol counts per directory
 	rows, err = db.conn.Query(`
-		SELECT 
-			CASE 
-				INSTR(s.file_id, '/') 
+		SELECT
+			CASE
+				INSTR(s.file_id, '/')
 				WHEN 0 THEN '.'
 				ELSE SUBSTR(s.file_id, 1, INSTR(s.file_id, '/') - 1)
 			END as dir,

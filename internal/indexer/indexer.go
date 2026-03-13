@@ -27,13 +27,13 @@ const (
 type Config struct {
 	// Root is the root directory to index (the path provided by user)
 	Root string
-	
+
 	// ProjectRoot is the git root directory (used as base for file IDs)
 	ProjectRoot string
-	
+
 	// ExcludePatterns are glob patterns for files/directories to exclude
 	ExcludePatterns []string
-	
+
 	// IncludeExtensions maps file extensions to languages
 	IncludeExtensions map[string]Language
 }
@@ -45,14 +45,14 @@ func DefaultConfig(root string) *Config {
 	if err != nil {
 		absRoot = root
 	}
-	
+
 	// Find git root
 	gitRoot := findGitRoot(absRoot)
 	if gitRoot == "" {
 		// No git root found, use the provided root
 		gitRoot = absRoot
 	}
-	
+
 	return &Config{
 		Root:        absRoot,
 		ProjectRoot: gitRoot,
@@ -85,13 +85,13 @@ func findGitRoot(path string) string {
 	if info, err := os.Stat(path); err == nil && !info.IsDir() {
 		dir = filepath.Dir(path)
 	}
-	
+
 	for {
 		gitPath := filepath.Join(dir, ".git")
 		if info, err := os.Stat(gitPath); err == nil && info.IsDir() {
 			return dir
 		}
-		
+
 		// Go up one directory
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -99,7 +99,7 @@ func findGitRoot(path string) string {
 		}
 		dir = parent
 	}
-	
+
 	return ""
 }
 
@@ -251,7 +251,7 @@ func (idx *Indexer) indexFile(path string, lang Language) error {
 
 	// Build symbol ID map for reference resolution
 	symbolMap := make(map[string]string) // name -> symbol ID
-	
+
 	// Save symbols
 	for _, sym := range symbols {
 		sym.FileID = relPath
@@ -347,12 +347,12 @@ func (idx *Indexer) DeleteFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("looking up file: %w", err)
 	}
-	
+
 	// If found, delete by ID (relative path)
 	if file != nil {
 		return idx.db.DeleteFile(file.ID)
 	}
-	
+
 	// If not found by absolute path, the path might already be a relative path
 	// Try computing relative path from project root
 	relPath, err := filepath.Rel(idx.config.ProjectRoot, path)
@@ -360,7 +360,7 @@ func (idx *Indexer) DeleteFile(path string) error {
 		return fmt.Errorf("computing relative path: %w", err)
 	}
 	relPath = filepath.ToSlash(relPath)
-	
+
 	return idx.db.DeleteFile(relPath)
 }
 
@@ -368,4 +368,5 @@ func (idx *Indexer) DeleteFile(path string) error {
 func (idx *Indexer) IndexAll(ctx context.Context) error {
 	return idx.Index(ctx)
 }
+
 // Test comment added
