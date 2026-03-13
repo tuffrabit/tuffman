@@ -2,15 +2,29 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/tuffrabit/tuffman/internal/indexer"
+	"github.com/tuffrabit/tuffman/internal/mcp"
 	"github.com/tuffrabit/tuffman/internal/storage"
 	"github.com/tuffrabit/tuffman/internal/watcher"
 )
+
+// OutputFormat represents the output format type
+type OutputFormat string
+
+const (
+	FormatText OutputFormat = "text"
+	FormatJSON OutputFormat = "json"
+)
+
+// Global format flag (set during argument parsing)
+var globalFormat = FormatText
 
 // Execute runs the CLI
 func Execute(ctx context.Context) error {
@@ -18,24 +32,46 @@ func Execute(ctx context.Context) error {
 		return printUsage()
 	}
 
-	cmd := os.Args[1]
+	// Check for global flags before command
 	args := os.Args[2:]
+	cmd := os.Args[1]
+
+	// Handle global flags
+	filteredArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--format":
+			if i+1 < len(args) {
+				globalFormat = OutputFormat(args[i+1])
+				if globalFormat != FormatJSON && globalFormat != FormatText {
+					return fmt.Errorf("invalid format: %s (must be 'text' or 'json')", globalFormat)
+				}
+				i++
+			}
+		default:
+			filteredArgs = append(filteredArgs, args[i])
+		}
+	}
 
 	switch cmd {
 	case "index":
-		return runIndex(ctx, args)
+		return runIndex(ctx, filteredArgs)
 	case "watch":
-		return runWatch(ctx, args)
+		return runWatch(ctx, filteredArgs)
 	case "stats":
-		return runStats(ctx, args)
+		return runStats(ctx, filteredArgs)
 	case "symbols":
-		return runSymbols(ctx, args)
+		return runSymbols(ctx, filteredArgs)
 	case "map":
-		return runMap(ctx, args)
+		return runMap(ctx, filteredArgs)
 	case "inspect":
-		return runInspect(ctx, args)
+		return runInspect(ctx, filteredArgs)
 	case "refs":
-		return runRefs(ctx, args)
+		return runRefs(ctx, filteredArgs)
+	case "read":
+		return runRead(ctx, filteredArgs)
+	case "server":
+		return runServer(ctx, filteredArgs)
 	case "help", "--help", "-h":
 		return printUsage()
 	default:
@@ -47,7 +83,7 @@ func printUsage() error {
 	fmt.Println(`tuffman - AI Agent Orchestrator
 
 Usage:
-  tuffman <command> [arguments]
+  tuffman <command> [arguments] [global flags]
 
 Commands:
   index [path]           Index a codebase (defaults to current directory)
@@ -57,6 +93,11 @@ Commands:
   map [--depth N]        Display repository structure
   inspect <symbol_id>    Show symbol details and references
   refs <symbol_id>       Show incoming/outgoing references
+  read <file> [range]    Read file contents (with optional line range)
+  server                 Run as MCP server
+
+Global Flags:
+  --format <type>        Output format: text or json (default: text)
 
 Examples:
   tuffman index                   # Index current directory
@@ -65,11 +106,15 @@ Examples:
   tuffman watch ./src             # Watch specific directory
   tuffman stats                   # Show database statistics
   tuffman symbols "Handler"       # Search for symbols containing "Handler"
+  tuffman symbols "Handler" --format json
   tuffman map                     # Show repository structure
   tuffman map --depth 2           # Show structure 2 levels deep
   tuffman inspect "main.go#main#1" # Show symbol details
   tuffman refs "main.go#main#1"   # Show outgoing references
-  tuffman refs "main.go#main#1" --direction in  # Show incoming references`)
+  tuffman refs "main.go#main#1" --direction in  # Show incoming references
+  tuffman read main.go            # Read entire file
+  tuffman read main.go:10:20      # Read lines 10-20
+  tuffman server                  # Run MCP server (stdio)`)
 	return nil
 }
 
@@ -178,10 +223,28 @@ func runStats(ctx context.Context, args []string) error {
 		return fmt.Errorf("getting stats: %w", err)
 	}
 
+	if globalFormat == FormatJSON {
+		result := map[string]interface{}{
+			"files":   fileCount,
+			"symbols": symbolCount,
+		}
+		return printJSON(result)
+	}
+
 	fmt.Printf("Database Statistics:\n")
 	fmt.Printf("  Files:   %d\n", fileCount)
 	fmt.Printf("  Symbols: %d\n", symbolCount)
 
+	return nil
+}
+
+// printJSON prints a value as JSON
+func printJSON(v interface{}) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding JSON: %w", err)
+	}
+	fmt.Println(string(data))
 	return nil
 }
 
@@ -201,6 +264,15 @@ func runSymbols(ctx context.Context, args []string) error {
 	symbols, err := db.SearchSymbols(query, "")
 	if err != nil {
 		return fmt.Errorf("searching symbols: %w", err)
+	}
+
+	if globalFormat == FormatJSON {
+		result := map[string]interface{}{
+			"query":   query,
+			"count":   len(symbols),
+			"symbols": symbols,
+		}
+		return printJSON(result)
 	}
 
 	if len(symbols) == 0 {
@@ -328,6 +400,22 @@ func runMap(ctx context.Context, args []string) error {
 		return fmt.Errorf("getting directory stats: %w", err)
 	}
 
+	totalFiles, totalSymbols, err := db.Stats()
+	if err != nil {
+		return fmt.Errorf("getting stats: %w", err)
+	}
+
+	if globalFormat == FormatJSON {
+		result := map[string]interface{}{
+			"root":          ".",
+			"languages":     langStats,
+			"directories":   dirStats,
+			"total_files":   totalFiles,
+			"total_symbols": totalSymbols,
+		}
+		return printJSON(result)
+	}
+
 	fmt.Println("Repository Structure")
 	fmt.Println("===================")
 	fmt.Println()
@@ -345,11 +433,6 @@ func runMap(ctx context.Context, args []string) error {
 	fmt.Println("Directory Tree:")
 	printDirectoryTree(dirStats, "", maxDepth, 0)
 
-	// Print totals
-	totalFiles, totalSymbols, err := db.Stats()
-	if err != nil {
-		return fmt.Errorf("getting stats: %w", err)
-	}
 	fmt.Println()
 	fmt.Printf("Total: %d files, %d symbols\n", totalFiles, totalSymbols)
 
@@ -426,6 +509,15 @@ func runInspect(ctx context.Context, args []string) error {
 	incoming, err := db.GetReferencesTo(symbolID)
 	if err != nil {
 		return fmt.Errorf("getting incoming references: %w", err)
+	}
+
+	if globalFormat == FormatJSON {
+		result := map[string]interface{}{
+			"symbol":   sym,
+			"outgoing": outgoing,
+			"incoming": incoming,
+		}
+		return printJSON(result)
 	}
 
 	// Print symbol details
@@ -671,4 +763,207 @@ func showIncomingRefs(db *storage.DB, symbolID string) error {
 	}
 
 	return nil
+}
+
+// runRead reads file contents with optional line range
+func runRead(ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: tuffman read <file>[:start_line[:end_line]]")
+	}
+
+	arg := args[0]
+	filePath, startLine, endLine, err := parseReadArg(arg)
+	if err != nil {
+		return err
+	}
+
+	// Try to find the file relative to project root or as absolute path
+	db, err := openDB()
+	if err != nil {
+		// Try reading directly if no DB
+		content, readErr := readFileContent(filePath, startLine, endLine)
+		if readErr != nil {
+			return fmt.Errorf("no index found and cannot read file: %w", err)
+		}
+		fmt.Print(content)
+		return nil
+	}
+	defer db.Close()
+
+	// First try: treat filePath as file ID (relative path)
+	file, err := db.GetFile(filePath)
+	if err != nil {
+		return fmt.Errorf("looking up file: %w", err)
+	}
+
+	// Second try: treat as absolute path
+	if file == nil {
+		file, err = db.GetFileByAbsolutePath(filePath)
+		if err != nil {
+			return fmt.Errorf("looking up file: %w", err)
+		}
+	}
+
+	// Third try: resolve relative to current directory
+	if file == nil {
+		absPath, err := filepath.Abs(filePath)
+		if err == nil {
+			file, err = db.GetFileByAbsolutePath(absPath)
+			if err != nil {
+				return fmt.Errorf("looking up file: %w", err)
+			}
+		}
+	}
+
+	var absolutePath string
+	if file != nil {
+		absolutePath = file.AbsolutePath
+	} else {
+		// Try reading directly
+		absolutePath = filePath
+	}
+
+	content, err := readFileContent(absolutePath, startLine, endLine)
+	if err != nil {
+		return fmt.Errorf("reading file: %w", err)
+	}
+
+	if globalFormat == FormatJSON {
+		result := map[string]interface{}{
+			"file":          filePath,
+			"absolute_path": absolutePath,
+			"start_line":    startLine,
+			"end_line":      endLine,
+			"content":       content,
+		}
+		return printJSON(result)
+	}
+
+	fmt.Print(content)
+	return nil
+}
+
+// parseReadArg parses file path with optional line range
+// Formats: file.go, file.go:10, file.go:10:20
+func parseReadArg(arg string) (filePath string, startLine, endLine int, err error) {
+	// Check for line range
+	parts := strings.Split(arg, ":")
+	filePath = parts[0]
+	startLine = 1
+	endLine = -1 // -1 means end of file
+
+	if len(parts) >= 2 {
+		startLine, err = strconv.Atoi(parts[1])
+		if err != nil || startLine < 1 {
+			return "", 0, 0, fmt.Errorf("invalid start line: %s", parts[1])
+		}
+	}
+
+	if len(parts) >= 3 {
+		endLine, err = strconv.Atoi(parts[2])
+		if err != nil || endLine < 1 {
+			return "", 0, 0, fmt.Errorf("invalid end line: %s", parts[2])
+		}
+	}
+
+	return filePath, startLine, endLine, nil
+}
+
+// readFileContent reads file content with optional line range
+func readFileContent(filePath string, startLine, endLine int) (string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", err
+	}
+
+	lines := strings.Split(string(data), "\n")
+
+	// Adjust line numbers to 0-indexed
+	startIdx := startLine - 1
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if startIdx >= len(lines) {
+		return "", fmt.Errorf("start line %d exceeds file length (%d lines)", startLine, len(lines))
+	}
+
+	endIdx := endLine - 1
+	if endLine == -1 || endIdx >= len(lines) {
+		endIdx = len(lines) - 1
+	}
+	if endIdx < startIdx {
+		return "", fmt.Errorf("end line %d is before start line %d", endLine, startLine)
+	}
+
+	selectedLines := lines[startIdx : endIdx+1]
+	return strings.Join(selectedLines, "\n") + "\n", nil
+}
+
+// runServer runs the MCP server
+func runServer(ctx context.Context, args []string) error {
+	root := "."
+	transport := "stdio"
+	noWatch := false
+
+	// Parse flags
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--path":
+			if i+1 < len(args) {
+				root = args[i+1]
+				i++
+			}
+		case "--transport":
+			if i+1 < len(args) {
+				transport = args[i+1]
+				i++
+			}
+		case "--no-watch":
+			noWatch = true
+		}
+	}
+
+	// Convert to absolute path
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolving path: %w", err)
+	}
+
+	// Check if path exists
+	if _, err := os.Stat(absRoot); err != nil {
+		return fmt.Errorf("path does not exist: %s", absRoot)
+	}
+
+	// Open database
+	dbPath, err := getDBPath()
+	if err != nil {
+		// Try to use path relative to root
+		dbPath = filepath.Join(absRoot, ".tuffman", "index.db")
+	}
+
+	tuffmanDir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(tuffmanDir, 0755); err != nil {
+		return fmt.Errorf("creating .tuffman directory: %w", err)
+	}
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer db.Close()
+
+	// Create server
+	config := &mcp.ServerConfig{
+		Root:      absRoot,
+		Transport: transport,
+		NoWatch:   noWatch,
+		DB:        db,
+	}
+
+	server, err := mcp.NewServer(config)
+	if err != nil {
+		return fmt.Errorf("creating MCP server: %w", err)
+	}
+
+	return server.Run(ctx)
 }
