@@ -23,17 +23,9 @@ const (
 	JSONRPCVersion = "2.0"
 )
 
-// ServerConfig holds server configuration
-type ServerConfig struct {
-	Root      string
-	Transport string // "stdio" or "http"
-	NoWatch   bool
-	DB        *storage.DB
-	Config    *config.Config // Loaded configuration
-}
-
-// Server represents an MCP server
-type Server struct {
+// DaemonServer runs the full MCP server with indexing and file watching capabilities.
+// This is meant to be run as a long-running daemon process that keeps the index up to date.
+type DaemonServer struct {
 	config    *ServerConfig
 	handler   *Handler
 	indexer   *indexer.Indexer
@@ -41,6 +33,15 @@ type Server struct {
 	transport Transport
 	mu        sync.RWMutex
 	started   bool
+}
+
+// ServerConfig holds server configuration
+type ServerConfig struct {
+	Root      string
+	Transport string // "stdio" or "http"
+	NoWatch   bool
+	DB        *storage.DB
+	Config    *config.Config // Loaded configuration
 }
 
 // Transport handles message I/O
@@ -87,8 +88,8 @@ func (t *StdioTransport) Close() error {
 	return nil
 }
 
-// NewServer creates a new MCP server
-func NewServer(serverConfig *ServerConfig) (*Server, error) {
+// NewDaemonServer creates a new MCP daemon server with indexing and watching capabilities
+func NewDaemonServer(serverConfig *ServerConfig) (*DaemonServer, error) {
 	// Use provided config or create default
 	cfg := serverConfig.Config
 	if cfg == nil {
@@ -113,7 +114,7 @@ func NewServer(serverConfig *ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("unsupported transport: %s", serverConfig.Transport)
 	}
 
-	s := &Server{
+	s := &DaemonServer{
 		config:    serverConfig,
 		indexer:   idx,
 		transport: transport,
@@ -133,8 +134,8 @@ func NewServer(serverConfig *ServerConfig) (*Server, error) {
 	return s, nil
 }
 
-// Run starts the MCP server
-func (s *Server) Run(ctx context.Context) error {
+// Run starts the MCP daemon server
+func (s *DaemonServer) Run(ctx context.Context) error {
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
@@ -177,7 +178,7 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 // processMessages handles incoming MCP messages
-func (s *Server) processMessages(ctx context.Context) error {
+func (s *DaemonServer) processMessages(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -224,7 +225,7 @@ func (s *Server) processMessages(ctx context.Context) error {
 }
 
 // handleMessage processes a single MCP message
-func (s *Server) handleMessage(ctx context.Context, data []byte) (*Response, error) {
+func (s *DaemonServer) handleMessage(ctx context.Context, data []byte) (*Response, error) {
 	// Try to parse as a request first
 	var req Request
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -265,7 +266,7 @@ func (s *Server) handleMessage(ctx context.Context, data []byte) (*Response, err
 }
 
 // handleInitialize handles the initialize request
-func (s *Server) handleInitialize(ctx context.Context, req *Request) *Response {
+func (s *DaemonServer) handleInitialize(ctx context.Context, req *Request) *Response {
 	var initReq InitializeRequest
 	if err := json.Unmarshal(req.Params, &initReq); err != nil {
 		return s.makeErrorResponse(req, InvalidParams, fmt.Sprintf("Invalid params: %v", err))
@@ -275,7 +276,7 @@ func (s *Server) handleInitialize(ctx context.Context, req *Request) *Response {
 	result := InitializeResponse{
 		ProtocolVersion: MCPProtocolVersion,
 		ServerInfo: Implementation{
-			Name:    "tuffman",
+			Name:    "tuffman-daemon",
 			Version: "0.6.0",
 		},
 		Capabilities: ServerCapabilities{
@@ -291,7 +292,7 @@ func (s *Server) handleInitialize(ctx context.Context, req *Request) *Response {
 }
 
 // handleToolsList handles the tools/list request
-func (s *Server) handleToolsList(ctx context.Context, req *Request) *Response {
+func (s *DaemonServer) handleToolsList(ctx context.Context, req *Request) *Response {
 	result := struct {
 		Tools []Tool `json:"tools"`
 	}{
@@ -302,7 +303,7 @@ func (s *Server) handleToolsList(ctx context.Context, req *Request) *Response {
 }
 
 // handleToolsCall handles the tools/call request
-func (s *Server) handleToolsCall(ctx context.Context, req *Request) *Response {
+func (s *DaemonServer) handleToolsCall(ctx context.Context, req *Request) *Response {
 	var callReq ToolCallRequest
 	if err := json.Unmarshal(req.Params, &callReq); err != nil {
 		return s.makeErrorResponse(req, InvalidParams, fmt.Sprintf("Invalid params: %v", err))
@@ -324,7 +325,7 @@ func (s *Server) handleToolsCall(ctx context.Context, req *Request) *Response {
 }
 
 // makeSuccessResponse creates a success response
-func (s *Server) makeSuccessResponse(req *Request, result interface{}) *Response {
+func (s *DaemonServer) makeSuccessResponse(req *Request, result interface{}) *Response {
 	return &Response{
 		JSONRPC: JSONRPCVersion,
 		ID:      req.ID,
@@ -333,7 +334,7 @@ func (s *Server) makeSuccessResponse(req *Request, result interface{}) *Response
 }
 
 // makeErrorResponse creates an error response
-func (s *Server) makeErrorResponse(req *Request, code int, message string) *Response {
+func (s *DaemonServer) makeErrorResponse(req *Request, code int, message string) *Response {
 	return &Response{
 		JSONRPC: JSONRPCVersion,
 		ID:      req.ID,
@@ -341,8 +342,8 @@ func (s *Server) makeErrorResponse(req *Request, code int, message string) *Resp
 	}
 }
 
-// Stop stops the server
-func (s *Server) Stop() error {
+// Stop stops the daemon server
+func (s *DaemonServer) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

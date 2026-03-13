@@ -63,8 +63,15 @@ func Execute(ctx context.Context) error {
 	switch cmd {
 	case "index":
 		err = runIndex(ctx, filteredArgs)
+	case "daemon":
+		err = runDaemon(ctx, filteredArgs)
+	case "mcp":
+		err = runMCP(ctx, filteredArgs)
 	case "watch":
-		err = runWatch(ctx, filteredArgs)
+		// Deprecated: watch is now an alias for daemon
+		err = runDaemon(ctx, filteredArgs)
+	case "status":
+		err = runStatus(ctx, filteredArgs)
 	case "stats":
 		err = runStats(ctx, filteredArgs)
 	case "symbols":
@@ -78,7 +85,9 @@ func Execute(ctx context.Context) error {
 	case "read":
 		err = runRead(ctx, filteredArgs)
 	case "server":
-		err = runServer(ctx, filteredArgs)
+		// Deprecated: server command is replaced by daemon and mcp
+		fmt.Fprintf(os.Stderr, "Warning: 'server' command is deprecated. Use 'tuffman daemon' for watch mode or 'tuffman mcp' for client mode.\n")
+		err = runDaemon(ctx, filteredArgs)
 	case "help", "--help", "-h":
 		err = printUsage()
 	default:
@@ -107,44 +116,50 @@ func printUsage() error {
 Usage:
   tuffman <command> [arguments] [global flags]
 
-Commands:
-  index [path]           Index a codebase (defaults to current directory)
-  watch [path]           Watch for changes and continuously index
+Daemon Commands (indexing & watching):
+  index [path]           One-time index of a codebase
+  daemon [path]          Run continuous indexer/watcher (use this for MCP)
+
+Query Commands (read-only, require existing index):
+  mcp                    Run MCP client server (stdio, read-only)
+  status                 Check index status and daemon health
   stats                  Show indexing statistics
   symbols <query>        Search for symbols by name
   map [--depth N]        Display repository structure
   inspect <symbol_id>    Show symbol details and references
   refs <symbol_id>       Show incoming/outgoing references
   read <file> [range]    Read file contents (with optional line range)
-  server                 Run as MCP server
 
 Global Flags:
   --format <type>        Output format: text or json (default: text)
   --config <path>        Path to config file (overrides default locations)
 
-Server Flags:
+Daemon Flags:
   --path <path>          Root path to index (default: current directory)
   --transport <type>     MCP transport: stdio (default)
   --no-watch             Disable auto-watch
 
+MCP Workflow:
+  1. Start daemon in background:
+     tuffman daemon &
+  
+  2. Use MCP client for queries:
+     tuffman mcp
+  
+  3. Or use CLI for one-off queries:
+     tuffman symbols "Handler"
+     tuffman map
+
 Examples:
-  tuffman index                   # Index current directory
-  tuffman index ./src             # Index specific directory
-  tuffman index --config ./custom.json  # Use custom config
-  tuffman watch                   # Watch current directory
-  tuffman watch ./src             # Watch specific directory
+  tuffman daemon                  # Start daemon for current directory
+  tuffman daemon ./src            # Start daemon for specific directory
+  tuffman daemon --no-watch       # Index once, don't watch for changes
+  tuffman mcp                     # Run MCP client (requires running daemon)
+  tuffman status                  # Check if index exists and is up to date
+  tuffman index                   # One-time manual index
   tuffman stats                   # Show database statistics
   tuffman symbols "Handler"       # Search for symbols containing "Handler"
-  tuffman symbols "Handler" --format json
-  tuffman map                     # Show repository structure
-  tuffman map --depth 2           # Show structure 2 levels deep
-  tuffman inspect "main.go#main#1" # Show symbol details
-  tuffman refs "main.go#main#1"   # Show outgoing references
-  tuffman refs "main.go#main#1" --direction in  # Show incoming references
-  tuffman read main.go            # Read entire file
-  tuffman read main.go:10:20      # Read lines 10-20
-  tuffman server                  # Run MCP server (stdio)
-  tuffman server --config ~/.config/tuffman/config.json`)
+  tuffman map --depth 2           # Show structure 2 levels deep`)
 	return nil
 }
 
@@ -1271,10 +1286,10 @@ func readFileContent(filePath string, startLine, endLine int) (string, error) {
 	return strings.Join(selectedLines, "\n") + "\n", nil
 }
 
-// runServer runs the MCP server
-func runServer(ctx context.Context, args []string) error {
+// runDaemon runs the MCP daemon server with indexing and watching capabilities
+func runDaemon(ctx context.Context, args []string) error {
 	root := "."
-	transport := ""
+	transport := "stdio"
 	noWatch := false
 	configPath := ""
 
@@ -1322,18 +1337,8 @@ func runServer(ctx context.Context, args []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	// Apply CLI overrides to config
-	if transport == "" {
-		transport = cfg.GetMCPTransport()
-	}
-
 	// Open database
-	dbPath, err := getDBPath()
-	if err != nil {
-		// Try to use path relative to root
-		dbPath = filepath.Join(absRoot, ".tuffman", "index.db")
-	}
-
+	dbPath := filepath.Join(absRoot, ".tuffman", "index.db")
 	tuffmanDir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(tuffmanDir, 0755); err != nil {
 		return fmt.Errorf("creating .tuffman directory: %w", err)
@@ -1345,7 +1350,7 @@ func runServer(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	// Create server config
+	// Create daemon server config
 	serverConfig := &mcp.ServerConfig{
 		Root:      absRoot,
 		Transport: transport,
@@ -1354,10 +1359,250 @@ func runServer(ctx context.Context, args []string) error {
 		Config:    cfg,
 	}
 
-	server, err := mcp.NewServer(serverConfig)
+	server, err := mcp.NewDaemonServer(serverConfig)
 	if err != nil {
-		return fmt.Errorf("creating MCP server: %w", err)
+		return fmt.Errorf("creating MCP daemon server: %w", err)
 	}
 
 	return server.Run(ctx)
+}
+
+// runMCP runs the MCP client server (read-only, requires existing index)
+func runMCP(ctx context.Context, args []string) error {
+	root := "."
+	transport := "stdio"
+	configPath := ""
+
+	// Parse flags
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--path":
+			if i+1 < len(args) {
+				root = args[i+1]
+				i++
+			}
+		case "--transport":
+			if i+1 < len(args) {
+				transport = args[i+1]
+				i++
+			}
+		case "--config":
+			if i+1 < len(args) {
+				configPath = args[i+1]
+				i++
+			}
+		}
+	}
+
+	// Convert to absolute path
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolving path: %w", err)
+	}
+
+	// Check if path exists
+	if _, err := os.Stat(absRoot); err != nil {
+		return fmt.Errorf("path does not exist: %s", absRoot)
+	}
+
+	// Load configuration
+	loader := config.NewLoader(absRoot)
+	if configPath != "" {
+		loader.SetOverridePath(configPath)
+	}
+	cfg, err := loader.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// Open database
+	dbPath := filepath.Join(absRoot, ".tuffman", "index.db")
+
+	// Check if database exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return fmt.Errorf(`no index found for %s
+
+To create an index, run one of:
+  tuffman index           # One-time index
+  tuffman daemon          # Start continuous indexer`, absRoot)
+	}
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer db.Close()
+
+	// Check if index has any data
+	fileCount, _, err := db.Stats()
+	if err != nil {
+		return fmt.Errorf("checking index status: %w", err)
+	}
+	if fileCount == 0 {
+		return fmt.Errorf(`index exists but is empty for %s
+
+To populate the index, run:
+  tuffman index           # One-time index
+  tuffman daemon          # Start continuous indexer`, absRoot)
+	}
+
+	// Create client server config
+	clientConfig := &mcp.ClientConfig{
+		Root:      absRoot,
+		Transport: transport,
+		DB:        db,
+		Config:    cfg,
+	}
+
+	server, err := mcp.NewClientServer(clientConfig)
+	if err != nil {
+		return fmt.Errorf("creating MCP client server: %w", err)
+	}
+
+	return server.Run(ctx)
+}
+
+// runStatus checks the index status and daemon health
+func runStatus(ctx context.Context, args []string) error {
+	root := "."
+	configPath := ""
+
+	// Parse flags
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--path":
+			if i+1 < len(args) {
+				root = args[i+1]
+				i++
+			}
+		case "--config":
+			if i+1 < len(args) {
+				configPath = args[i+1]
+				i++
+			}
+		}
+	}
+
+	// Convert to absolute path
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolving path: %w", err)
+	}
+
+	// Check if path exists
+	if _, err := os.Stat(absRoot); err != nil {
+		return fmt.Errorf("path does not exist: %s", absRoot)
+	}
+
+	// Load configuration
+	loader := config.NewLoader(absRoot)
+	if configPath != "" {
+		loader.SetOverridePath(configPath)
+	}
+	cfg, err := loader.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// Check database
+	dbPath := filepath.Join(absRoot, ".tuffman", "index.db")
+
+	status := struct {
+		Root         string           `json:"root"`
+		IndexExists  bool             `json:"index_exists"`
+		Files        int64            `json:"files"`
+		Symbols      int64            `json:"symbols"`
+		Languages    map[string]int64 `json:"languages"`
+		LastIndexed  string           `json:"last_indexed"`
+		ConfigLoaded bool             `json:"config_loaded"`
+		ConfigPath   string           `json:"config_path,omitempty"`
+		DBPath       string           `json:"db_path"`
+	}{
+		Root:         absRoot,
+		DBPath:       dbPath,
+		ConfigLoaded: cfg != nil,
+		ConfigPath:   configPath,
+	}
+
+	// Check if database exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		status.IndexExists = false
+		if globalFormat == FormatJSON {
+			return printJSON(status)
+		}
+		fmt.Printf("Index Status: NOT FOUND\n")
+		fmt.Printf("  Path: %s\n", absRoot)
+		fmt.Printf("  Database: %s (does not exist)\n\n", dbPath)
+		fmt.Printf("To create an index, run:\n")
+		fmt.Printf("  tuffman index           # One-time index\n")
+		fmt.Printf("  tuffman daemon          # Start continuous indexer\n")
+		return nil
+	}
+
+	status.IndexExists = true
+
+	// Open database to get stats
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		if globalFormat == FormatJSON {
+			status.IndexExists = false
+			return printJSON(status)
+		}
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer db.Close()
+
+	// Get stats
+	fileCount, symbolCount, err := db.Stats()
+	if err != nil {
+		return fmt.Errorf("getting stats: %w", err)
+	}
+	status.Files = fileCount
+	status.Symbols = symbolCount
+
+	// Get language stats
+	langStats, err := db.GetFileLanguageStats()
+	if err != nil {
+		return fmt.Errorf("getting language stats: %w", err)
+	}
+	status.Languages = langStats
+
+	// Get last indexed time
+	lastIndexed, err := db.GetLastIndexedTime()
+	if err != nil {
+		return fmt.Errorf("getting last indexed time: %w", err)
+	}
+	status.LastIndexed = lastIndexed
+
+	if globalFormat == FormatJSON {
+		return printJSON(status)
+	}
+
+	// Text output
+	fmt.Printf("Index Status: %s\n", func() string {
+		if fileCount == 0 {
+			return "EMPTY"
+		}
+		return "OK"
+	}())
+	fmt.Printf("  Path:      %s\n", absRoot)
+	fmt.Printf("  Database:  %s\n", dbPath)
+	fmt.Printf("  Files:     %d\n", fileCount)
+	fmt.Printf("  Symbols:   %d\n", symbolCount)
+	if lastIndexed != "" {
+		fmt.Printf("  Updated:   %s\n", lastIndexed)
+	}
+	if len(langStats) > 0 {
+		fmt.Printf("  Languages:\n")
+		for lang, count := range langStats {
+			fmt.Printf("    %s: %d files\n", lang, count)
+		}
+	}
+	if fileCount == 0 {
+		fmt.Printf("\nTo populate the index, run:\n")
+		fmt.Printf("  tuffman index           # One-time index\n")
+		fmt.Printf("  tuffman daemon          # Start continuous indexer\n")
+	}
+
+	return nil
 }
