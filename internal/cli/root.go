@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tuffrabit/tuffman/internal/config"
 	"github.com/tuffrabit/tuffman/internal/indexer"
 	"github.com/tuffrabit/tuffman/internal/mcp"
 	"github.com/tuffrabit/tuffman/internal/storage"
@@ -119,10 +120,17 @@ Commands:
 
 Global Flags:
   --format <type>        Output format: text or json (default: text)
+  --config <path>        Path to config file (overrides default locations)
+
+Server Flags:
+  --path <path>          Root path to index (default: current directory)
+  --transport <type>     MCP transport: stdio (default)
+  --no-watch             Disable auto-watch
 
 Examples:
   tuffman index                   # Index current directory
   tuffman index ./src             # Index specific directory
+  tuffman index --config ./custom.json  # Use custom config
   tuffman watch                   # Watch current directory
   tuffman watch ./src             # Watch specific directory
   tuffman stats                   # Show database statistics
@@ -135,7 +143,8 @@ Examples:
   tuffman refs "main.go#main#1" --direction in  # Show incoming references
   tuffman read main.go            # Read entire file
   tuffman read main.go:10:20      # Read lines 10-20
-  tuffman server                  # Run MCP server (stdio)`)
+  tuffman server                  # Run MCP server (stdio)
+  tuffman server --config ~/.config/tuffman/config.json`)
 	return nil
 }
 
@@ -198,8 +207,16 @@ type IndexResult struct {
 
 func runIndex(ctx context.Context, args []string) error {
 	root := "."
-	if len(args) > 0 {
-		root = args[0]
+	configPath := ""
+
+	// Parse args and flags
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--config" && i+1 < len(args) {
+			configPath = args[i+1]
+			i++
+		} else if !strings.HasPrefix(args[i], "--") {
+			root = args[i]
+		}
 	}
 
 	// Convert to absolute path
@@ -219,6 +236,19 @@ func runIndex(ctx context.Context, args []string) error {
 		return fmt.Errorf("path does not exist: %s", absRoot)
 	}
 
+	// Load configuration
+	loader := config.NewLoader(absRoot)
+	if configPath != "" {
+		loader.SetOverridePath(configPath)
+	}
+	cfg, err := loader.Load()
+	if err != nil {
+		if globalFormat == FormatJSON {
+			return printJSON(IndexResult{Root: absRoot, Success: false, Error: fmt.Sprintf("loading config: %v", err)})
+		}
+		return fmt.Errorf("loading config: %w", err)
+	}
+
 	// Open database
 	db, err := openDB()
 	if err != nil {
@@ -229,9 +259,9 @@ func runIndex(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	// Create indexer
-	config := indexer.DefaultConfig(absRoot)
-	idx := indexer.New(db, config)
+	// Create indexer using config
+	idxConfig := cfg.ToIndexerConfig(absRoot)
+	idx := indexer.New(db, idxConfig)
 
 	if globalFormat != FormatJSON {
 		fmt.Printf("Indexing %s...\n", absRoot)
@@ -424,8 +454,16 @@ func printJSONLine(v interface{}) {
 
 func runWatch(ctx context.Context, args []string) error {
 	root := "."
-	if len(args) > 0 {
-		root = args[0]
+	configPath := ""
+
+	// Parse args and flags
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--config" && i+1 < len(args) {
+			configPath = args[i+1]
+			i++
+		} else if !strings.HasPrefix(args[i], "--") {
+			root = args[i]
+		}
 	}
 
 	// Convert to absolute path
@@ -447,6 +485,20 @@ func runWatch(ctx context.Context, args []string) error {
 		return fmt.Errorf("path does not exist: %s", absRoot)
 	}
 
+	// Load configuration
+	loader := config.NewLoader(absRoot)
+	if configPath != "" {
+		loader.SetOverridePath(configPath)
+	}
+	cfg, err := loader.Load()
+	if err != nil {
+		if globalFormat == FormatJSON {
+			printJSONLine(WatchEvent{Type: "error", Error: fmt.Sprintf("loading config: %v", err)})
+			return nil
+		}
+		return fmt.Errorf("loading config: %w", err)
+	}
+
 	// Open database
 	db, err := openDB()
 	if err != nil {
@@ -458,9 +510,9 @@ func runWatch(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	// Create indexer
-	config := indexer.DefaultConfig(absRoot)
-	idx := indexer.New(db, config)
+	// Create indexer using config
+	idxConfig := cfg.ToIndexerConfig(absRoot)
+	idx := indexer.New(db, idxConfig)
 
 	isJSONMode := globalFormat == FormatJSON
 
@@ -500,8 +552,8 @@ func runWatch(ctx context.Context, args []string) error {
 		fmt.Println("\nWatching for changes... (Press Ctrl-C to stop)")
 	}
 
-	// Create watcher
-	watcherConfig := watcher.DefaultConfig(absRoot, config)
+	// Create watcher using config
+	watcherConfig := cfg.ToWatcherConfig(idxConfig)
 
 	var handler watcher.Handler = idx
 	if isJSONMode {
@@ -1222,8 +1274,9 @@ func readFileContent(filePath string, startLine, endLine int) (string, error) {
 // runServer runs the MCP server
 func runServer(ctx context.Context, args []string) error {
 	root := "."
-	transport := "stdio"
+	transport := ""
 	noWatch := false
+	configPath := ""
 
 	// Parse flags
 	for i := 0; i < len(args); i++ {
@@ -1240,6 +1293,11 @@ func runServer(ctx context.Context, args []string) error {
 			}
 		case "--no-watch":
 			noWatch = true
+		case "--config":
+			if i+1 < len(args) {
+				configPath = args[i+1]
+				i++
+			}
 		}
 	}
 
@@ -1252,6 +1310,21 @@ func runServer(ctx context.Context, args []string) error {
 	// Check if path exists
 	if _, err := os.Stat(absRoot); err != nil {
 		return fmt.Errorf("path does not exist: %s", absRoot)
+	}
+
+	// Load configuration
+	loader := config.NewLoader(absRoot)
+	if configPath != "" {
+		loader.SetOverridePath(configPath)
+	}
+	cfg, err := loader.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// Apply CLI overrides to config
+	if transport == "" {
+		transport = cfg.GetMCPTransport()
 	}
 
 	// Open database
@@ -1272,15 +1345,16 @@ func runServer(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	// Create server
-	config := &mcp.ServerConfig{
+	// Create server config
+	serverConfig := &mcp.ServerConfig{
 		Root:      absRoot,
 		Transport: transport,
 		NoWatch:   noWatch,
 		DB:        db,
+		Config:    cfg,
 	}
 
-	server, err := mcp.NewServer(config)
+	server, err := mcp.NewServer(serverConfig)
 	if err != nil {
 		return fmt.Errorf("creating MCP server: %w", err)
 	}

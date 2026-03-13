@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/tuffrabit/tuffman/internal/config"
 	"github.com/tuffrabit/tuffman/internal/indexer"
 	"github.com/tuffrabit/tuffman/internal/storage"
 	"github.com/tuffrabit/tuffman/internal/watcher"
@@ -28,6 +29,7 @@ type ServerConfig struct {
 	Transport string // "stdio" or "http"
 	NoWatch   bool
 	DB        *storage.DB
+	Config    *config.Config // Loaded configuration
 }
 
 // Server represents an MCP server
@@ -86,35 +88,41 @@ func (t *StdioTransport) Close() error {
 }
 
 // NewServer creates a new MCP server
-func NewServer(config *ServerConfig) (*Server, error) {
-	// Create indexer configuration
-	idxConfig := indexer.DefaultConfig(config.Root)
+func NewServer(serverConfig *ServerConfig) (*Server, error) {
+	// Use provided config or create default
+	cfg := serverConfig.Config
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+
+	// Create indexer configuration from file config
+	idxConfig := cfg.ToIndexerConfig(serverConfig.Root)
 
 	// Create indexer
-	idx := indexer.New(config.DB, idxConfig)
+	idx := indexer.New(serverConfig.DB, idxConfig)
 
 	// Create handler
-	handler := NewHandler(config.DB, config.Root)
+	handler := NewHandler(serverConfig.DB, serverConfig.Root)
 
 	// Create transport
 	var transport Transport
-	switch config.Transport {
+	switch serverConfig.Transport {
 	case "stdio":
 		transport = NewStdioTransport()
 	default:
-		return nil, fmt.Errorf("unsupported transport: %s", config.Transport)
+		return nil, fmt.Errorf("unsupported transport: %s", serverConfig.Transport)
 	}
 
 	s := &Server{
-		config:    config,
-		handler:   handler,
+		config:    serverConfig,
 		indexer:   idx,
 		transport: transport,
+		handler:   handler,
 	}
 
 	// Initialize watcher if not disabled
-	if !config.NoWatch {
-		watcherConfig := watcher.DefaultConfig(config.Root, idxConfig)
+	if !serverConfig.NoWatch {
+		watcherConfig := cfg.ToWatcherConfig(idxConfig)
 		w, err := watcher.New(watcherConfig, idx)
 		if err != nil {
 			return nil, fmt.Errorf("creating watcher: %w", err)
@@ -131,19 +139,27 @@ func (s *Server) Run(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	// Do initial index if index is empty
+	// Get config for auto-index setting
+	cfg := s.config.Config
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+
+	// Do initial index if index is empty and auto-index is enabled
 	fileCount, _, err := s.indexer.Stats()
 	if err != nil {
 		return fmt.Errorf("checking index status: %w", err)
 	}
 
-	if fileCount == 0 {
+	if fileCount == 0 && cfg.ShouldAutoIndexOnStart() {
 		fmt.Fprintf(os.Stderr, "Indexing %s...\n", s.config.Root)
 		if err := s.indexer.Index(ctx); err != nil {
 			return fmt.Errorf("initial indexing: %w", err)
 		}
 		fileCount, _, _ = s.indexer.Stats()
 		fmt.Fprintf(os.Stderr, "Indexed %d files\n", fileCount)
+	} else if fileCount == 0 {
+		fmt.Fprintf(os.Stderr, "Auto-index disabled. Run 'tuffman index' to populate the index.\n")
 	} else {
 		fmt.Fprintf(os.Stderr, "Using existing index with %d files\n", fileCount)
 	}
