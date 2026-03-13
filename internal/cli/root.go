@@ -212,6 +212,7 @@ func runSymbols(ctx context.Context, args []string) error {
 
 	for _, sym := range symbols {
 		fmt.Printf("%s (%s)\n", sym.Name, sym.Kind)
+		fmt.Printf("  ID: %s\n", sym.ID)
 		fmt.Printf("  File: %s:%d\n", sym.FileID, sym.LineStart)
 		if sym.Signature != "" {
 			fmt.Printf("  Signature: %s\n", sym.Signature)
