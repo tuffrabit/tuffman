@@ -14,9 +14,9 @@ CGO_ENABLED=1 go build -o tuffman ./cmd/tuffman
 CGO_ENABLED=1 go build -ldflags="-s -w" -o tuffman ./cmd/tuffman
 ```
 
-### 2. Start the Watcher
+### 2. Start Watch Mode
 
-For MCP integration, first start the watcher in your project directory:
+For MCP integration, first start watch mode in your project directory:
 
 ```bash
 # Start watching and indexing
@@ -42,9 +42,9 @@ tuffman status
 
 ## Architecture
 
-tuffman uses a **watcher + client** architecture:
+tuffman uses a **watch + client** architecture:
 
-- **Watcher** (`tuffman watch`): Runs continuously, indexes files, watches for changes
+- **Watch** (`tuffman watch`): Runs continuously, indexes files, watches for changes
 - **Client** (`tuffman mcp`): Read-only MCP server for queries
 - **Database**: SQLite with WAL mode for concurrent access
 
@@ -55,7 +55,7 @@ This design allows:
 
 ## Commands
 
-### Daemon Commands (Indexing)
+### Indexing Commands
 
 | Command | Description |
 |---------|-------------|
@@ -98,7 +98,7 @@ For MCP clients (Claude Desktop, etc.), configure the **client** command:
 ## Workflow
 
 ```bash
-# Terminal 1: Start watcher
+# Terminal 1: Start watch mode
 cd /path/to/project
 tuffman watch &
 

@@ -63,9 +63,6 @@ func Execute(ctx context.Context) error {
 	switch cmd {
 	case "index":
 		err = runIndex(ctx, filteredArgs)
-	case "daemon":
-		// daemon is an alias for watch
-		err = runWatch(ctx, filteredArgs)
 	case "mcp":
 		err = runMCP(ctx, filteredArgs)
 	case "watch":
@@ -116,7 +113,7 @@ func printUsage() error {
 Usage:
   tuffman <command> [arguments] [global flags]
 
-Daemon Commands (indexing & watching):
+Indexing Commands:
   index [path]           One-time index of a codebase
   watch [path]           Run continuous indexer/watcher (use this for MCP)
 
@@ -135,7 +132,7 @@ Global Flags:
   --config <path>        Path to config file (overrides default locations)
 
 MCP Workflow:
-  1. Start watch/daemon in background:
+  1. Start watch in background:
      tuffman watch &
   
   2. Use MCP client for queries:
